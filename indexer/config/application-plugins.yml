@@ -1,0 +1,68 @@
+store:
+  plugins:
+    enabled: true
+    exit-on-error: false
+    metrics-enabled: true
+
+    filters:
+      # Strict metadata filter - ONLY keep label 1694 + correct instance
+      # This is the ONLY filter - transactions and UTXOs are saved permissively
+      # and cleaned up by the scheduler based on metadata presence
+      metadata.save:
+        - name: "TOM Metadata Filter"
+          lang: mvel
+          script:
+            file: /app/plugins/scripts/treasury-filter.mvel
+            function: filterMetadata
+
+      # NO UTXO filter - save all UTXOs initially, cleanup by scheduler
+      # NO transaction filter - save all transactions initially, cleanup by scheduler
+
+    post-actions:
+      metadata.save:
+        - name: "Track TOM Transactions"
+          lang: mvel
+          script:
+            file: /app/plugins/scripts/treasury-filter.mvel
+            function: trackTomTransactions
+
+    # Comprehensive cleanup - runs every 10 minutes
+    # Removes transactions and UTXOs that don't have matching TOM metadata
+    schedulers:
+      - name: "Non-TOM Data Cleanup"
+        lang: mvel
+        schedule:
+          type: CRON
+          value: "0 */2 * * * ?"
+        inline-script: |
+          System.out.println("Non-TOM Cleanup: Starting...");
+
+          // Get current max block for safety margin
+          emptyParams = new java.util.HashMap();
+          maxBlockResult = named_jdbc.queryForList("SELECT MAX(number) as max_block FROM yaci_store.block", emptyParams);
+          if (maxBlockResult == null || maxBlockResult.size() == 0) {
+            System.out.println("Non-TOM Cleanup: No blocks found, skipping");
+            return;
+          }
+          maxBlock = maxBlockResult.get(0).get("max_block");
+          if (maxBlock == null) {
+            System.out.println("Non-TOM Cleanup: Max block is null, skipping");
+            return;
+          }
+
+          // Safety margin: only clean data older than 100 blocks
+          safeBlock = maxBlock - 100;
+          System.out.println("Non-TOM Cleanup: Max block=" + maxBlock + ", safe block=" + safeBlock);
+
+          params = new java.util.HashMap();
+          params.put("safeBlock", safeBlock);
+
+          // Delete transactions without TOM metadata (batched to avoid deadlocks)
+          // NOTE: UTXO cleanup disabled during sync due to deadlock issues - will cleanup after sync
+          System.out.println("Non-TOM Cleanup: Deleting transactions...");
+          txDeleted = named_jdbc.update(
+            "DELETE FROM yaci_store.transaction WHERE ctid IN (SELECT ctid FROM yaci_store.transaction WHERE block < :safeBlock AND tx_hash NOT IN (SELECT tx_hash FROM yaci_store.transaction_metadata WHERE label = '1694') LIMIT 50000)",
+            params
+          );
+
+          System.out.println("Non-TOM Cleanup: Deleted " + txDeleted + " transactions (before block " + safeBlock + ")");

@@ -1,0 +1,29 @@
+// Treasury instance identifier - only track metadata for this specific instance
+TREASURY_INSTANCE = "9e65e4ed7d6fd86fc4827d2b45da6d2c601fb920e8bfd794b8ecc619";
+
+// Filter metadata - only keep label 1694 with matching treasury instance
+def filterMetadata(items) {
+    filtered = new java.util.ArrayList();
+    mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+
+    for (item : items) {
+        if (item.label == "1694") {
+            body = item.body;
+            if (body != null && body instanceof java.lang.String) {
+                bodyMap = mapper.readValue(body, java.util.Map);
+                instance = bodyMap.get("instance");
+                if (instance != null && instance.equals(TREASURY_INSTANCE)) {
+                    filtered.add(item);
+                }
+            }
+        }
+    }
+    return filtered;
+}
+
+// Post-action: Log when TOM metadata is saved
+def trackTomTransactions(items) {
+    for (item : items) {
+        System.out.println("TOM Metadata saved for tx: " + item.txHash);
+    }
+}

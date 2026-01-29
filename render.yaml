@@ -1,0 +1,64 @@
+# Render Blueprint for Cardano Administration Fund Tracking System
+# https://render.com/docs/blueprint-spec
+#
+# Deploy: Connect your GitHub repo to Render and select this blueprint
+# Or use: render blueprint apply
+#
+# After deployment:
+# 1. The indexer will start syncing from the configured slot
+# 2. Initial sync takes time - monitor via /actuator/health endpoint
+# 3. API will be available immediately at /health
+
+services:
+  # Administration API - Rust backend for querying administration data
+  - type: web
+    name: administration-api
+    runtime: docker
+    dockerfilePath: ./api/Dockerfile
+    dockerContext: ./api
+    region: oregon
+    plan: starter
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: administration-db
+          property: connectionString
+      - key: RUST_LOG
+        value: info
+    autoDeploy: true
+
+  # YACI Store Indexer - Syncs Cardano blockchain data
+  # Note: This is a long-running service that syncs blockchain data
+  # It needs more resources than the API
+  - type: web
+    name: administration-indexer
+    runtime: docker
+    dockerfilePath: ./indexer/Dockerfile.render
+    dockerContext: ./indexer
+    region: oregon
+    plan: standard  # Needs more memory for blockchain sync
+    healthCheckPath: /actuator/health
+    envVars:
+      - key: JAVA_OPTS
+        value: -Xmx1536m -Xms512m -XX:+UseG1GC
+      - key: SPRING_DATASOURCE_URL
+        fromDatabase:
+          name: administration-db
+          property: connectionString
+      - key: SPRING_DATASOURCE_USERNAME
+        fromDatabase:
+          name: administration-db
+          property: user
+      - key: SPRING_DATASOURCE_PASSWORD
+        fromDatabase:
+          name: administration-db
+          property: password
+    autoDeploy: true
+
+databases:
+  # PostgreSQL database for storing blockchain and administration data
+  - name: administration-db
+    plan: basic-256mb  # 1GB storage, upgrade to standard for production
+    region: oregon
+    postgresMajorVersion: "15"

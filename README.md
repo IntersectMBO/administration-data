@@ -1,2 +1,268 @@
-# administration-data
-Project to to read on-chain budget administration data, and serve it via a convenient API. 
+# Intersect Budget Administration Data
+
+A system to collect on-chain Budget administration data
+and offer a simple API.
+
+Using YACI Store for blockchain indexing,
+PostgreSQL for storage
+and a Rust-based API backend.
+
+Swagger Docs hosted at
+- [administration.info.intersectmbo.org/docs](https://administration.info.intersectmbo.org/docs)
+
+API instance hosted at
+- [administration.info.intersectmbo.org/api/v1](https://administration.info.intersectmbo.org/api/v1)
+
+## Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Cardano Node   │────▶│   YACI Store    │────▶│   PostgreSQL    │
+│   (Mainnet)     │     │   (Indexer)     │     │   (Database)    │
+└─────────────────┘     └─────────────────┘     └────────┬────────┘
+                                                         │
+                                                         ▼
+                                                ┌─────────────────┐
+                                                │   Rust API      │
+                                                │   (Backend)     │
+                                                └─────────────────┘
+```
+
+## Project Structure
+
+```
+administration-data/
+├── indexer/                 # YACI Store indexer configuration
+│   ├── application.properties
+│   ├── config/
+│   │   └── application-plugins.yml  # Plugin filter configuration
+│   ├── plugins/
+│   │   └── scripts/
+│   │       └── treasury-filter.mvel # UTXO & metadata filter logic
+│   └── README.md
+├── api/                     # Rust API backend
+│   ├── src/
+│   │   ├── main.rs
+│   │   ├── routes/v1/       # V1 API endpoints
+│   │   ├── models/v1.rs     # API models with OpenAPI
+│   │   ├── openapi.rs       # Swagger/OpenAPI config
+│   │   └── db/              # Database utilities
+│   ├── Cargo.toml
+│   └── README.md            # Full API documentation
+├── docs/                    # Documentation
+│   └── architecture.md      # Data flow diagrams
+├── database/
+│   └── schema/              # Schema definitions
+├── scripts/                # Utility shell scripts
+├── .github/                # CI/CD workflows
+├── docker-compose.yml
+└── dev.sh                   # Development helper script
+```
+
+## Quick Start
+
+### Prerequisites
+
+- Docker and Docker Compose
+
+### Start All Services
+
+```bash
+./dev.sh start
+```
+
+This starts:
+- **PostgreSQL** on port 5433 (host) / 5432 (container)
+- **YACI Store Indexer** on port 8081 (syncs Cardano blockchain)
+- **Administration API** on port 8080
+
+### Verify Services
+
+```bash
+# Check service status
+./dev.sh status
+
+# Test API health
+curl http://localhost:8080/health
+# Returns: OK
+
+# Get API status
+curl http://localhost:8080/api/v1/status
+
+# View interactive API docs
+open http://localhost:8080/docs
+
+# Check indexer sync status
+curl http://localhost:8081/api/v1/blocks/latest
+```
+
+## API Endpoints
+
+Base URL: `http://localhost:8080`
+
+Interactive documentation available at `/docs` (Swagger UI).
+
+### Core Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /health` | Health check |
+| `GET /docs` | Swagger UI (interactive API docs) |
+| `GET /api/v1/status` | API status and sync info |
+| `GET /api/v1/statistics` | Comprehensive statistics |
+
+### Treasury
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/treasury` | Treasury contract details with statistics |
+| `GET /api/v1/treasury/utxos` | Treasury UTXOs |
+| `GET /api/v1/treasury/events` | Treasury-level events |
+
+### Vendor Contracts (Projects)
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/vendor-contracts` | List all vendor contracts (with pagination, filtering, search) |
+| `GET /api/v1/vendor-contracts/:project_id` | Get vendor contract details |
+| `GET /api/v1/vendor-contracts/:project_id/milestones` | Get project milestones |
+| `GET /api/v1/vendor-contracts/:project_id/events` | Get project event history |
+| `GET /api/v1/vendor-contracts/:project_id/utxos` | Get project UTXOs |
+
+### Milestones
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/milestones` | List all milestones (with pagination, filtering) |
+| `GET /api/v1/milestones/:id` | Get milestone details |
+
+### Events
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/events` | List all events (with pagination, filtering) |
+| `GET /api/v1/events/recent` | Recent activity feed |
+| `GET /api/v1/events/:tx_hash` | Get event by transaction hash |
+
+**[Full API Documentation →](api/README.md)**
+
+## YACI Store Indexer API
+
+The YACI Store indexer exposes its own API on port 8081:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/blocks/latest` | Latest synced block |
+| `GET /api/v1/blocks/:number` | Block by number |
+| `GET /api/v1/txs/:hash` | Transaction by hash |
+| `GET /api/v1/addresses/:addr/utxos` | UTXOs by address |
+| `GET /actuator/health` | Indexer health status |
+
+## Configuration
+
+### Treasury Reserve Contract
+
+We can configure the Treasury Reserve instance that we index for.
+
+| Property | Value |
+|----------|-------|
+| Payment Address | `addr1xxzc8pt7fgf0lc0x7eq6z7z6puhsxmzktna7dluahrj6g6v9swzhujsjlls7dajp59u95re0qdk9vh8mumlemw89535s4ecqxj` |
+| Stake Address | `stake17xzc8pt7fgf0lc0x7eq6z7z6puhsxmzktna7dluahrj6g6ghh5qjr` |
+| Script Hash | `8583857e4a12ffe1e6f641a1785a0f2f036c565cfbe6ff9db8e5a469` |
+
+### Sync Configuration
+
+| Property | Value |
+|----------|-------|
+| Network | Mainnet |
+| Start Slot | 160964954 |
+| Start Block | 12125945 |
+
+Edit `indexer/application.properties` to modify sync settings.
+
+## Development Commands
+
+```bash
+./dev.sh start      # Start all services
+./dev.sh stop       # Stop all services
+./dev.sh status     # Check service status
+./dev.sh logs       # Show all logs
+./dev.sh logs api   # Show API logs only
+./dev.sh logs indexer  # Show indexer logs only
+./dev.sh build      # Rebuild Docker images
+./dev.sh clean      # Remove containers and volumes
+./dev.sh help       # Show help
+```
+
+## Database
+
+### Schema
+
+The system uses two schemas:
+
+**yaci_store** - Raw blockchain data from YACI Store indexer:
+
+| Table | Description | Filtering |
+|-------|-------------|-----------|
+| `yaci_store.block` | Blockchain blocks | All blocks stored |
+| `yaci_store.address_utxo` | Treasury UTXOs | Only treasury stake credential |
+| `yaci_store.transaction_metadata` | TOM metadata | Only label 1694 |
+
+**treasury** - Normalized application data:
+
+| Table | Description |
+|-------|-------------|
+| `treasury.treasury_contracts` | Treasury reserve contracts (TRSC) |
+| `treasury.vendor_contracts` | Vendor/project contracts (PSSC) |
+| `treasury.milestones` | Project milestones |
+| `treasury.events` | All TOM event audit log |
+| `treasury.utxos` | UTXO tracking for event linking |
+
+### Connecting to Database
+
+```bash
+# Via docker
+docker exec -it administration-postgres psql -U postgres -d administration_data
+
+# Via local psql (port 5433)
+psql -h localhost -p 5433 -U postgres -d administration_data
+```
+
+### Key Queries
+
+```sql
+-- Latest synced block
+SELECT * FROM yaci_store.block ORDER BY number DESC LIMIT 5;
+
+-- Treasury summary
+SELECT * FROM treasury.v_treasury_summary;
+
+-- Vendor contracts with financials
+SELECT project_id, project_name, status,
+       initial_amount_lovelace / 1000000 as allocated_ada,
+       total_disbursed_lovelace / 1000000 as disbursed_ada
+FROM treasury.v_vendor_contracts_summary;
+
+-- Recent events
+SELECT * FROM treasury.v_events_with_context
+ORDER BY block_time DESC LIMIT 10;
+```
+
+### Plugin Filtering
+
+YACI Store plugins filter blockchain data to only store treasury-relevant information:
+
+- **Metadata Filter**: Only metadata with label `1694` (TOM standard) AND instance `9e65e4ed7d6fd86fc4827d2b45da6d2c601fb920e8bfd794b8ecc619`
+
+This reduces database size by ~95% while keeping all treasury data.
+
+## Component Documentation
+
+- [Architecture & Data Flow](docs/architecture.md) - System architecture and data flow diagrams
+- [API Documentation](api/README.md) - Full API reference
+- [Indexer Setup](indexer/README.md) - YACI Store configuration
+- [Database Schema](database/schema/) - Treasury schema definitions
+
+## License
+
+See [LICENSE](./LICENSE).

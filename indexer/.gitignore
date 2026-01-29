@@ -1,0 +1,7 @@
+# YACI Store JAR files (should be downloaded separately)
+yaci-store-all-*.jar
+yaci-store.jar
+yaci-store-*.zip
+
+# Logs
+*.log
