@@ -1,0 +1,87 @@
+name: Build and Push to ECR
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Compute tag
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA7="${GITHUB_SHA::7}"
+          BRANCH="${GITHUB_REF_NAME}"
+          RUN_NO="${{ github.run_number }}"
+          TAG="${BRANCH}-r${RUN_NO}-${SHA7}"
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SHA7="${GITHUB_SHA::7}"
+          BRANCH="${GITHUB_REF_NAME}"
+          RUN_NO="${{ github.run_number }}"
+
+          TAG="${{ steps.meta.outputs.tag }}"
+          IMAGE_URI="${{ vars.ECR_REPO_URI }}:${TAG}"
+
+          docker build --pull --no-cache \
+            --network=host \
+            -f api/Dockerfile \
+            -t "$IMAGE_URI" \
+            .
+          docker push "$IMAGE_URI"
+      
+      - name: Trigger Helm bump workflow
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.HELM_REPO_TOKEN }}
+          HELM_OWNER: IntersectMBO
+          HELM_REPO: helm-charts
+          IMAGE_REPO_URI: ${{ vars.ECR_REPO_URI }}
+          IMAGE_TAG: ${{ steps.meta.outputs.tag }}
+          ENVIRONMENT: ${{ steps.meta.outputs.branch }}
+          CHART_DIR: ${{ vars.HELM_CHART_DIR }}
+          IMAGE_KEY: ${{ vars.HELM_IMAGE_KEY }}
+        run: |
+          set -euo pipefail
+
+          curl -sS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${HELM_OWNER}/${HELM_REPO}/dispatches" \
+            -d "$(jq -nc \
+              --arg event_type "bump-image" \
+              --arg image_repo "$IMAGE_REPO_URI" \
+              --arg image_tag "$IMAGE_TAG" \
+              --arg environment "$ENVIRONMENT" \
+              --arg chart_dir "$CHART_DIR" \
+              --arg image_key "$IMAGE_KEY" \
+              '{event_type:$event_type, client_payload:{image_repo:$image_repo, image_tag:$image_tag, environment:$environment, chart_dir:$chart_dir, image_key:$image_key}}')"
