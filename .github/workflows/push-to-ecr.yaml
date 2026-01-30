@@ -56,7 +56,7 @@ jobs:
             --network=host \
             -f api/Dockerfile \
             -t "$IMAGE_URI" \
-            .
+            api
           docker push "$IMAGE_URI"
       
       - name: Trigger Helm bump workflow
