@@ -33,31 +33,34 @@ API instance hosted at
 ```
 administration-data/
 ├── .env                        # Environment variables (not committed)
-├── indexer/                 # YACI Store indexer configuration
+├── .env.example                # Environment variable template
+├── indexer/                    # YACI Store indexer configuration
 │   ├── application.properties
 │   ├── config/
 │   │   └── application-plugins.yml  # Plugin filter configuration
 │   ├── plugins/
 │   │   └── scripts/
-│   │       └── treasury-filter.mvel # UTXO & metadata filter logic
+│   │       └── treasury-filter.mvel # Metadata filter logic
 │   └── README.md
-├── api/                     # Rust API backend
+├── api/                        # Rust API backend
 │   ├── src/
 │   │   ├── main.rs
-│   │   ├── routes/v1/       # V1 API endpoints
-│   │   ├── models/v1.rs     # API models with OpenAPI
-│   │   ├── openapi.rs       # Swagger/OpenAPI config
-│   │   └── db/              # Database utilities
+│   │   ├── routes/v1/          # V1 API endpoints
+│   │   ├── models/v1.rs        # API models with OpenAPI
+│   │   ├── openapi.rs          # Swagger/OpenAPI config
+│   │   └── services/           # Background sync & event processing
 │   ├── Cargo.toml
-│   └── README.md            # Full API documentation
-├── docs/                    # Documentation
-│   └── architecture.md      # Data flow diagrams
+│   └── README.md               # Full API documentation
 ├── database/
-│   └── schema/              # Schema definitions
-├── scripts/                # Utility shell scripts
-├── .github/                # CI/CD workflows
+│   ├── init/                   # Docker PostgreSQL init scripts (run on first start)
+│   │   └── 02-treasury-schema.sql
+│   └── schema/
+│       └── treasury.sql        # Treasury schema (single source of truth)
+├── docs/                       # Documentation
+│   └── architecture.md         # Data flow diagrams
+├── .github/                    # CI/CD workflows
 ├── docker-compose.yml
-└── dev.sh                   # Development helper script
+└── dev.sh                      # Development helper script
 ```
 
 ## Quick Start
@@ -206,7 +209,7 @@ Network settings (host, port, protocol magic) are in `indexer/application.proper
 
 The system uses two schemas:
 
-**yaci_store** - Raw blockchain data from YACI Store indexer:
+**yaci_store** - Raw blockchain data, managed automatically by YACI Store via Flyway migrations:
 
 | Table | Description | Filtering |
 |-------|-------------|-----------|
@@ -214,7 +217,7 @@ The system uses two schemas:
 | `yaci_store.address_utxo` | Treasury UTXOs | Only treasury stake credential |
 | `yaci_store.transaction_metadata` | TOM metadata | Only label 1694 |
 
-**treasury** - Normalized application data:
+**treasury** - Normalized application data (defined in [`database/schema/treasury.sql`](database/schema/treasury.sql)):
 
 | Table | Description |
 |-------|-------------|

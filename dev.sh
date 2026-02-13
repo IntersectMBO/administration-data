@@ -157,21 +157,11 @@ case "$COMMAND" in
         
         print_success "PostgreSQL is ready"
 
-        # Ensure yaci_store schema and tables exist
-        print_info "Ensuring yaci_store schema is applied..."
-        TABLES_COUNT=$(docker-compose exec -T postgres psql -U postgres -d administration_data -tAc \
-            "SELECT count(*) FROM information_schema.tables WHERE table_schema='yaci_store'" 2>/dev/null \
-            | tr -d '[:space:]' || echo "0")
-
-        if [ "$TABLES_COUNT" = "0" ] || [ -z "$TABLES_COUNT" ]; then
-            print_info "Applying yaci_store schema and tables..."
-            docker-compose exec -T postgres psql -U postgres -d administration_data \
-                -f /docker-entrypoint-initdb.d/01-create-schema.sql \
-                -f /docker-entrypoint-initdb.d/02-yaci-store-tables.sql
-            print_success "Schema applied"
-        else
-            print_success "yaci_store schema exists ($TABLES_COUNT tables)"
-        fi
+        # Ensure treasury schema exists (YACI Store creates its own schema/tables via Flyway)
+        print_info "Ensuring treasury schema exists..."
+        docker-compose exec -T postgres psql -U postgres -d administration_data \
+            -f /docker-entrypoint-initdb.d/02-treasury-schema.sql 2>/dev/null || true
+        print_success "Database schemas ready"
 
         # Start indexer if JAR is available
         if [ "$INDEXER_AVAILABLE" = true ]; then
