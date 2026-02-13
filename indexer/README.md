@@ -185,7 +185,7 @@ ORDER BY slot DESC LIMIT 10;
 The indexer uses the official YACI Store Docker image:
 
 ```yaml
-image: bloxbean/yaci-store:2.0.0-beta5
+image: bloxbean/yaci-store:2.0.0
 ```
 
 Configuration is mounted at `/app/config/application.properties`.

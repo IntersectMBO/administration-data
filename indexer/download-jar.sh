@@ -5,7 +5,7 @@
 
 set -e
 
-VERSION=${1:-"2.0.0-beta5"}
+VERSION=${1:-"2.0.0"}
 ZIP_FILE="yaci-store-${VERSION}.zip"
 JAR_FILE="yaci-store.jar"
 

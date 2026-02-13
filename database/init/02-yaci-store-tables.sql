@@ -1,5 +1,5 @@
 -- YACI Store Schema for PostgreSQL
--- Combined from YACI Store 2.0.0-beta5 migration files
+-- Combined from YACI Store 2.0.0 migration files
 -- This schema is run before the application starts to create all required tables
 
 -- =====================================================

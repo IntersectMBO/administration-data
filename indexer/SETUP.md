@@ -10,12 +10,12 @@
 The YACI Store JAR file needs to be downloaded manually:
 
 1. Visit https://github.com/bloxbean/yaci-store/releases
-2. Download the latest `yaci-store-all-*.jar` file (e.g., `yaci-store-all-2.0.0-beta5.jar`)
+2. Download the latest `yaci-store-all-*.jar` file (e.g., `yaci-store-all-2.0.0.jar`)
 3. Place it in the `indexer/` directory
 
 Alternatively, you can try the download script:
 ```bash
-./download-jar.sh 2.0.0-beta5
+./download-jar.sh 2.0.0
 ```
 
 Note: The script may fail if the release tag format is different. In that case, download manually.
