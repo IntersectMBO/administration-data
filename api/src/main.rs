@@ -10,7 +10,6 @@ use tower_http::cors::{Any, CorsLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-mod db;
 mod models;
 mod openapi;
 mod routes;
@@ -63,12 +62,6 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = pool.expect("Pool should be initialized after retries");
     tracing::info!("Database connection established");
-
-    // Initialize administration schema (creates tables if they don't exist)
-    if let Err(e) = db::init_administration_schema(&pool).await {
-        tracing::error!("Failed to initialize administration schema: {}", e);
-        return Err(e.into());
-    }
 
     // Spawn background sync task
     let sync_pool = pool.clone();

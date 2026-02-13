@@ -142,7 +142,7 @@ curl http://localhost:8081/actuator/prometheus
 
 ## Database Schema
 
-YACI Store creates tables in the `yaci_store` schema:
+YACI Store automatically creates and manages its tables via Flyway migrations on startup. Tables are created in the `yaci_store` schema:
 
 | Table | Description |
 |-------|-------------|

@@ -37,8 +37,11 @@ This is used by the `treasury-filter.mvel` plugin script to filter metadata by i
 Edit `application.properties` to configure:
 - Database connection details
 - Cardano network settings
-- Sync start point (slot/block)
 - Which stores to enable/disable
+
+### Database Schema
+
+YACI Store manages its own database schema and tables automatically via Flyway migrations on startup. No manual table creation is needed.
 
 ## Build and Test
 

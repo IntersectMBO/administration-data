@@ -13,6 +13,30 @@ use super::event_processor::EventProcessor;
 pub async fn run_sync_loop(pool: PgPool) {
     let processor = EventProcessor::new(pool.clone());
 
+    // Wait for yaci_store tables to be created by the indexer's Flyway migrations
+    tracing::info!("Waiting for yaci_store tables to be available...");
+    for attempt in 1..=30 {
+        let table_exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'yaci_store' AND table_name = 'transaction_metadata')"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(false);
+
+        if table_exists {
+            tracing::info!("yaci_store tables are ready");
+            break;
+        }
+
+        if attempt == 30 {
+            tracing::warn!("yaci_store tables not found after 30 attempts, proceeding anyway");
+            break;
+        }
+
+        tracing::info!("yaci_store tables not ready yet, retrying in 5s... (attempt {}/30)", attempt);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+
     // Initial sync: process all events from beginning
     tracing::info!("Starting initial TOM event sync...");
     if let Err(e) = processor.sync_all_events().await {
