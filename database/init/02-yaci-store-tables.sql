@@ -1,6 +1,7 @@
 -- YACI Store Schema for PostgreSQL
 -- Combined from YACI Store 2.0.0 migration files
 -- This schema is run before the application starts to create all required tables
+-- All statements are idempotent (safe to re-run)
 
 -- =====================================================
 -- Create yaci_store schema
@@ -14,8 +15,7 @@ SET search_path TO yaci_store;
 -- Core Tables (from components/core)
 -- =====================================================
 
-drop table if exists cursor_ cascade;
-create table cursor_
+CREATE TABLE IF NOT EXISTS cursor_
 (
     id          integer not null,
     block_hash  varchar(64),
@@ -33,8 +33,7 @@ CREATE INDEX IF NOT EXISTS idx_cursor_slot ON cursor_(slot);
 CREATE INDEX IF NOT EXISTS idx_cursor_block_number ON cursor_(block_number);
 CREATE INDEX IF NOT EXISTS idx_cursor_block_hash ON cursor_(block_hash);
 
-drop table if exists era cascade;
-create table era
+CREATE TABLE IF NOT EXISTS era
 (
     era        int not null primary key,
     start_slot bigint not null,
@@ -46,8 +45,7 @@ create table era
 -- Block Store Tables (from stores/blocks)
 -- =====================================================
 
-drop table if exists block cascade;
-create table block
+CREATE TABLE IF NOT EXISTS block
 (
     hash               varchar(64) not null
         primary key,
@@ -83,8 +81,7 @@ CREATE INDEX IF NOT EXISTS idx_block_epoch ON block(epoch);
 CREATE INDEX IF NOT EXISTS idx_block_slot_leader ON block(slot_leader);
 CREATE INDEX IF NOT EXISTS idx_block_slot ON block(slot);
 
-drop table if exists rollback cascade;
-create table rollback
+CREATE TABLE IF NOT EXISTS rollback
 (
     id                     bigint not null primary key generated always as identity,
     rollback_to_block_hash varchar(64),
@@ -96,8 +93,7 @@ create table rollback
     update_datetime        timestamp
 );
 
-drop table if exists block_cbor cascade;
-create table block_cbor
+CREATE TABLE IF NOT EXISTS block_cbor
 (
     block_hash      varchar(64) not null primary key,
     cbor_data       bytea not null,
@@ -113,8 +109,7 @@ CREATE INDEX IF NOT EXISTS idx_block_cbor_slot ON block_cbor(slot);
 -- UTXO Store Tables (from stores/utxo)
 -- =====================================================
 
-drop table if exists address_utxo cascade;
-create table address_utxo
+CREATE TABLE IF NOT EXISTS address_utxo
 (
     tx_hash               varchar(64) not null,
     output_index          smallint    not null,
@@ -142,8 +137,7 @@ create table address_utxo
 CREATE INDEX IF NOT EXISTS idx_address_utxo_slot ON address_utxo(slot);
 CREATE INDEX IF NOT EXISTS idx_reference_script_hash ON address_utxo(reference_script_hash);
 
-drop table if exists tx_input cascade;
-create table tx_input
+CREATE TABLE IF NOT EXISTS tx_input
 (
     output_index          smallint      not null,
     tx_hash                     varchar(64) not null,
@@ -159,8 +153,7 @@ create table tx_input
 CREATE INDEX IF NOT EXISTS idx_tx_input_slot ON tx_input(spent_at_slot);
 CREATE INDEX IF NOT EXISTS idx_tx_input_block ON tx_input(spent_at_block);
 
-drop table if exists address cascade;
-create table address
+CREATE TABLE IF NOT EXISTS address
 (
     id                 bigserial,
     address            varchar(500) unique not null,
@@ -176,8 +169,7 @@ create table address
 CREATE INDEX IF NOT EXISTS idx_address_stake_address ON address (stake_address);
 CREATE INDEX IF NOT EXISTS idx_address_slot ON address (slot);
 
-drop table if exists ptr_address cascade;
-create table ptr_address
+CREATE TABLE IF NOT EXISTS ptr_address
 (
     address            varchar(500),
     stake_address      varchar(255),
@@ -188,8 +180,7 @@ create table ptr_address
 -- Transaction Store Tables (from stores/transaction)
 -- =====================================================
 
-drop table if exists transaction cascade;
-create table transaction
+CREATE TABLE IF NOT EXISTS transaction
 (
     tx_hash                 varchar(64) not null
         primary key,
@@ -220,8 +211,7 @@ create table transaction
 
 CREATE INDEX IF NOT EXISTS idx_transaction_slot ON transaction(slot);
 
-drop table if exists transaction_witness cascade;
-create table transaction_witness
+CREATE TABLE IF NOT EXISTS transaction_witness
 (
     tx_hash varchar(64) not null,
     idx   integer not null,
@@ -236,8 +226,7 @@ create table transaction_witness
 
 CREATE INDEX IF NOT EXISTS idx_transaction_witness_slot ON transaction_witness(slot);
 
-drop table if exists withdrawal cascade;
-create table withdrawal
+CREATE TABLE IF NOT EXISTS withdrawal
 (
     tx_hash         varchar(64),
     address         varchar(255),
@@ -252,8 +241,7 @@ create table withdrawal
 
 CREATE INDEX IF NOT EXISTS idx_withdrawal_slot ON withdrawal(slot);
 
-drop table if exists invalid_transaction cascade;
-create table invalid_transaction
+CREATE TABLE IF NOT EXISTS invalid_transaction
 (
     tx_hash         varchar(64) not null
         primary key,
@@ -266,8 +254,7 @@ create table invalid_transaction
 
 CREATE INDEX IF NOT EXISTS idx_invalid_transaction_slot ON invalid_transaction(slot);
 
-drop table if exists transaction_cbor cascade;
-create table transaction_cbor
+CREATE TABLE IF NOT EXISTS transaction_cbor
 (
     tx_hash         varchar(64) not null primary key,
     cbor_data       bytea not null,
@@ -283,8 +270,7 @@ CREATE INDEX IF NOT EXISTS idx_transaction_cbor_slot ON transaction_cbor(slot);
 -- Metadata Store Tables (from stores/metadata)
 -- =====================================================
 
-drop table if exists transaction_metadata cascade;
-create table transaction_metadata
+CREATE TABLE IF NOT EXISTS transaction_metadata
 (
     id                    uuid not null primary key,
     slot                  bigint,
