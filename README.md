@@ -1,6 +1,6 @@
 # Intersect Budget Administration Data
 
-A system to collect on-chain Budget administration data
+A system to collect on-chain Budget administration data for instances of [treasury-contracts](https://github.com/SundaeSwap-finance/treasury-contracts)
 and offer a simple API.
 
 Using YACI Store for blockchain indexing,
@@ -65,6 +65,7 @@ administration-data/
 ### Prerequisites
 
 - Docker and Docker Compose
+- Create a `.env` based on [`.env.example`](./.env.example)
 
 ### Start All Services
 
@@ -172,21 +173,18 @@ TREASURY_INSTANCE=9e65e4ed7d6fd86fc4827d2b45da6d2c601fb920e8bfd794b8ecc619
 
 This environment variable is passed to the indexer container via `docker-compose.yml` and used by the `treasury-filter.mvel` plugin script to filter metadata.
 
-| Property | Value |
-|----------|-------|
-| Payment Address | `addr1xxzc8pt7fgf0lc0x7eq6z7z6puhsxmzktna7dluahrj6g6v9swzhujsjlls7dajp59u95re0qdk9vh8mumlemw89535s4ecqxj` |
-| Stake Address | `stake17xzc8pt7fgf0lc0x7eq6z7z6puhsxmzktna7dluahrj6g6ghh5qjr` |
-| Script Hash | `8583857e4a12ffe1e6f641a1785a0f2f036c565cfbe6ff9db8e5a469` |
-
 ### Sync Configuration
 
-| Property | Value |
-|----------|-------|
-| Network | Mainnet |
-| Start Slot | 160964954 |
-| Start Block | 12125945 |
+Limitation: this is only configured for Mainnet currently
 
-Edit `indexer/application.properties` to modify sync settings.
+The sync start point is configured via environment variables in `.env`:
+
+```bash
+STORE_CARDANO_SYNC_START_SLOT=160964954
+STORE_CARDANO_SYNC_START_BLOCKHASH=560c7537831007f9670d287b15a69ba18a322b1edc39c0c23ccab3c12ad77b9f
+```
+
+Network settings (host, port, protocol magic) are in `indexer/application.properties`.
 
 ## Development Commands
 
