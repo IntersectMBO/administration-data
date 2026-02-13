@@ -60,9 +60,8 @@ JAR_FILE=$(find indexer -name "yaci-store*.jar" -type f 2>/dev/null | head -1)
 if [ -z "$JAR_FILE" ]; then
     print_warning "YACI Store JAR file not found in indexer/ directory"
     print_info "To download:"
-    print_info "  1. Visit https://github.com/bloxbean/yaci-store/releases"
-    print_info "  2. Download yaci-store.jar or yaci-store-all-*.jar"
-    print_info "  3. Place it in the indexer/ directory"
+    print_info "  Visit https://github.com/bloxbean/yaci-store/releases"
+    print_info "  or use /indexer/download-jar.sh"
     INDEXER_AVAILABLE=false
 else
     print_success "YACI Store JAR found: $JAR_FILE"
