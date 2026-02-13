@@ -35,6 +35,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    env_file:
+      - .env
     environment:
       - JAVA_OPTS=-Xmx2g -Xms1g
     ports:

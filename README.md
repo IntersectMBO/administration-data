@@ -32,6 +32,7 @@ API instance hosted at
 
 ```
 administration-data/
+├── .env                        # Environment variables (not committed)
 ├── indexer/                 # YACI Store indexer configuration
 │   ├── application.properties
 │   ├── config/
@@ -162,7 +163,14 @@ The YACI Store indexer exposes its own API on port 8081:
 
 ### Treasury Reserve Contract
 
-We can configure the Treasury Reserve instance that we index for.
+We can configure the Treasury Reserve instance that we index for via the `.env` file at the project root:
+
+```bash
+# .env
+TREASURY_INSTANCE=9e65e4ed7d6fd86fc4827d2b45da6d2c601fb920e8bfd794b8ecc619
+```
+
+This environment variable is passed to the indexer container via `docker-compose.yml` and used by the `treasury-filter.mvel` plugin script to filter metadata.
 
 | Property | Value |
 |----------|-------|
@@ -252,7 +260,7 @@ ORDER BY block_time DESC LIMIT 10;
 
 YACI Store plugins filter blockchain data to only store treasury-relevant information:
 
-- **Metadata Filter**: Only metadata with label `1694` (TOM standard) AND instance `9e65e4ed7d6fd86fc4827d2b45da6d2c601fb920e8bfd794b8ecc619`
+- **Metadata Filter**: Only metadata with label `1694` (TOM standard) AND the treasury instance configured via `TREASURY_INSTANCE` in `.env`
 
 This reduces database size by ~95% while keeping all treasury data.
 

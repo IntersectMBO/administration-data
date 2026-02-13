@@ -162,8 +162,8 @@ This document describes how data flows through the Cardano Administration Data S
                            │                    │
                            ▼                    ▼
                     ┌─────────────────────────────────────┐
-                    │  instance == "9e65e4ed..." ?        │
-                    │  (Treasury instance ID)             │
+                    │  instance == TREASURY_INSTANCE ?    │
+                    │  (from env variable)                │
                     └─────────────────────────────────────┘
                            │                    │
                           YES                   NO
