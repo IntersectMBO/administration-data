@@ -1,5 +1,5 @@
 # Render-compatible Dockerfile for YACI Store Indexer
-FROM bloxbean/yaci-store:2.0.0-beta5
+FROM bloxbean/yaci-store:2.0.0
 
 USER root
 
