@@ -30,7 +30,7 @@ services:
       - administration-network
 
   indexer:
-    image: bloxbean/yaci-store:2.0.0-beta5
+    image: bloxbean/yaci-store:2.0.0
     container_name: administration-indexer
     depends_on:
       postgres:
