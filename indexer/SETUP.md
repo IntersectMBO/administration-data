@@ -22,6 +22,18 @@ Note: The script may fail if the release tag format is different. In that case, 
 
 ## Configuration
 
+### Environment Variables
+
+Create a `.env` file in the project root with the treasury instance to filter for:
+
+```bash
+TREASURY_INSTANCE=9e65e4ed7d6fd86fc4827d2b45da6d2c601fb920e8bfd794b8ecc619
+```
+
+This is used by the `treasury-filter.mvel` plugin script to filter metadata by instance.
+
+### Application Properties
+
 Edit `application.properties` to configure:
 - Database connection details
 - Cardano network settings

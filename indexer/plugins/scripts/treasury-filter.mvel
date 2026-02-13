@@ -1,5 +1,5 @@
 // Treasury instance identifier - only track metadata for this specific instance
-TREASURY_INSTANCE = "9e65e4ed7d6fd86fc4827d2b45da6d2c601fb920e8bfd794b8ecc619";
+TREASURY_INSTANCE = System.getenv("TREASURY_INSTANCE");
 
 // Filter metadata - only keep label 1694 with matching treasury instance
 def filterMetadata(items) {
