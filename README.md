@@ -180,13 +180,14 @@ This environment variable is passed to the indexer container via `docker-compose
 
 ### Sync Configuration
 
-| Property | Value |
-|----------|-------|
-| Network | Mainnet |
-| Start Slot | 160964954 |
-| Start Block | 12125945 |
+The sync start point is configured via environment variables in `.env`:
 
-Edit `indexer/application.properties` to modify sync settings.
+```bash
+STORE_CARDANO_SYNC_START_SLOT=160964954
+STORE_CARDANO_SYNC_START_BLOCKHASH=560c7537831007f9670d287b15a69ba18a322b1edc39c0c23ccab3c12ad77b9f
+```
+
+Network settings (host, port, protocol magic) are in `indexer/application.properties`.
 
 ## Development Commands
 
