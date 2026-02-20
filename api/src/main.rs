@@ -10,6 +10,13 @@ use tower_http::cors::{Any, CorsLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+fn env_u16(key: &str, default: u16) -> u16 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.parse::<u16>().ok())
+        .unwrap_or(default)
+}
+
 mod models;
 mod openapi;
 mod routes;
@@ -87,9 +94,10 @@ async fn main() -> anyhow::Result<()> {
         );
 
     // Start server
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+    let port = env_u16("PORT", 8080);
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Server listening on {}", addr);
-    tracing::info!("Swagger UI available at http://localhost:8080/docs");
+    tracing::info!("Swagger UI available at http://localhost:{}/docs",port);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
