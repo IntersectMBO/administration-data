@@ -38,7 +38,20 @@ publish, initialize, fund, complete, disburse, withdraw, pause, resume, modify, 
 
 ### Financial Model
 - All amounts are in **lovelace** (1 ADA = 1,000,000 lovelace)
-- Milestone lifecycle: pending → completed → disbursed
+
+### Milestone Lifecycle
+Milestones use 3 independent boolean flags (not a linear status):
+- **evidence_provided** — vendor submitted completion evidence via a `complete` transaction
+- **withdrawn** — vendor withdrew payment via a `withdraw` transaction
+- **archived** — milestone replaced by a `modify` event (old row preserved, new row created)
+
+Additionally, each milestone has a **time_limit** (POSIXTime ms) from the inline UTXO datum.
+Claimability is derived: time_limit < current time AND NOT withdrawn.
+
+Archive model: on modify, existing row → archived=true, new row inserted. superseded_by FK links old → new.
+
+**Disburse vs Withdraw**: Disburse is treasury-level (moves funds from treasury contract to any address).
+Withdraw is milestone-level (vendor claims matured milestone funds from vendor contract). These are completely separate.
 
 ### Treasury Instance
 The `TREASURY_INSTANCE` env var filters to a specific on-chain treasury. Changing it tracks a different treasury entirely.
@@ -136,6 +149,8 @@ Never modify `yaci-store.jar` or YACI Store internals. Primary network: Mainnet 
 - **`.env` not committed**: copy `.env.example` and configure before first run.
 - **UTXO pruning**: YACI Store prunes spent UTXOs — historical UTXO data may not be available.
 - **Large JAR**: `indexer/yaci-store.jar` is ~108MB and committed to the repo. Don't regenerate unnecessarily.
+- **Inline datums**: `store.script.enabled` must be `true` in YACI Store config for milestone datum data (amounts, time limits). Currently disabled.
+- **Milestone archiving**: Filter `WHERE NOT archived` for current milestones. Archived rows are historical versions.
 
 ## Key File Locations
 
