@@ -249,7 +249,7 @@ SELECT * FROM treasury.v_treasury_summary;
 -- Vendor contracts with financials
 SELECT project_id, project_name, status,
        initial_amount_lovelace / 1000000 as allocated_ada,
-       total_disbursed_lovelace / 1000000 as disbursed_ada
+       total_withdrawn_lovelace / 1000000 as withdrawn_ada
 FROM treasury.v_vendor_contracts_summary;
 
 -- Recent events

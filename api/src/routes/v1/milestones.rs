@@ -36,8 +36,22 @@ pub async fn list_milestones(
     let mut conditions = Vec::new();
     let mut bind_index = 1;
 
-    if params.status.is_some() {
-        conditions.push(format!("m.status = ${}", bind_index));
+    // Default to non-archived milestones unless archived filter is explicitly set
+    if let Some(archived) = params.archived {
+        conditions.push(format!("m.archived = ${}", bind_index));
+        bind_index += 1;
+        let _ = archived; // used via binding below
+    } else {
+        conditions.push("NOT m.archived".to_string());
+    }
+
+    if params.withdrawn.is_some() {
+        conditions.push(format!("m.withdrawn = ${}", bind_index));
+        bind_index += 1;
+    }
+
+    if params.evidence_provided.is_some() {
+        conditions.push(format!("m.evidence_provided = ${}", bind_index));
         bind_index += 1;
     }
 
@@ -55,7 +69,7 @@ pub async fn list_milestones(
     // Determine sort order
     let sort_clause = match params.sort.as_deref() {
         Some("complete_time") => "m.complete_time DESC NULLS LAST",
-        Some("disburse_time") => "m.disburse_time DESC NULLS LAST",
+        Some("withdraw_time") => "m.withdraw_time DESC NULLS LAST",
         Some("amount") => "m.amount_lovelace DESC NULLS LAST",
         _ => "vc.project_id, m.milestone_order",
     };
@@ -73,8 +87,14 @@ pub async fn list_milestones(
 
     let mut count_q = sqlx::query_as::<_, (i64,)>(&count_query);
 
-    if let Some(ref status) = params.status {
-        count_q = count_q.bind(status);
+    if let Some(archived) = params.archived {
+        count_q = count_q.bind(archived);
+    }
+    if let Some(withdrawn) = params.withdrawn {
+        count_q = count_q.bind(withdrawn);
+    }
+    if let Some(evidence_provided) = params.evidence_provided {
+        count_q = count_q.bind(evidence_provided);
     }
     if let Some(ref project_id) = params.project_id {
         count_q = count_q.bind(project_id);
@@ -100,14 +120,20 @@ pub async fn list_milestones(
             m.description,
             m.acceptance_criteria,
             m.amount_lovelace,
-            m.status,
+            m.time_limit,
+            m.withdrawn,
+            m.evidence_provided,
+            m.archived,
             m.complete_tx_hash,
             m.complete_time,
             m.complete_description,
             m.evidence,
-            m.disburse_tx_hash,
-            m.disburse_time,
-            m.disburse_amount,
+            m.withdraw_tx_hash,
+            m.withdraw_time,
+            m.withdraw_amount,
+            m.archived_by_tx_hash,
+            m.archived_at,
+            m.superseded_by,
             vc.project_id,
             vc.project_name
         FROM treasury.milestones m
@@ -124,8 +150,14 @@ pub async fn list_milestones(
 
     let mut data_q = sqlx::query_as::<_, MilestoneRow>(&data_query);
 
-    if let Some(ref status) = params.status {
-        data_q = data_q.bind(status);
+    if let Some(archived) = params.archived {
+        data_q = data_q.bind(archived);
+    }
+    if let Some(withdrawn) = params.withdrawn {
+        data_q = data_q.bind(withdrawn);
+    }
+    if let Some(evidence_provided) = params.evidence_provided {
+        data_q = data_q.bind(evidence_provided);
     }
     if let Some(ref project_id) = params.project_id {
         data_q = data_q.bind(project_id);
@@ -175,14 +207,20 @@ pub async fn get_milestone(
             m.description,
             m.acceptance_criteria,
             m.amount_lovelace,
-            m.status,
+            m.time_limit,
+            m.withdrawn,
+            m.evidence_provided,
+            m.archived,
             m.complete_tx_hash,
             m.complete_time,
             m.complete_description,
             m.evidence,
-            m.disburse_tx_hash,
-            m.disburse_time,
-            m.disburse_amount,
+            m.withdraw_tx_hash,
+            m.withdraw_time,
+            m.withdraw_amount,
+            m.archived_by_tx_hash,
+            m.archived_at,
+            m.superseded_by,
             vc.project_id,
             vc.project_name
         FROM treasury.milestones m

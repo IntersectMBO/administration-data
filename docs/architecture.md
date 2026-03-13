@@ -206,7 +206,7 @@ This document describes how data flows through the Cardano Administration Data S
 │        ┌─────────────┬───────────────┼───────────────┬─────────────┐        │
 │        ▼             ▼               ▼               ▼             ▼        │
 │   ┌─────────┐  ┌──────────┐  ┌────────────┐  ┌──────────┐  ┌──────────┐    │
-│   │ publish │  │initialize│  │    fund    │  │ complete │  │ disburse │    │
+│   │ publish │  │initialize│  │    fund    │  │ complete │  │ withdraw │    │
 │   └─────────┘  └──────────┘  └────────────┘  └──────────┘  └──────────┘    │
 │        │             │               │               │             │        │
 │        ▼             ▼               ▼               ▼             ▼        │
@@ -224,9 +224,10 @@ This document describes how data flows through the Cardano Administration Data S
 │   │ id            │     │ id            │    │ id        │    │ id       │  │
 │   │ instance      │◄────│ treasury_id   │◄───│ vendor_id │    │ tx_hash  │  │
 │   │ name          │     │ project_id    │    │ label     │    │ event    │  │
-│   │ publish_tx    │     │ project_name  │    │ status    │    │ metadata │  │
+│   │ publish_tx    │     │ project_name  │    │ withdrawn │    │ metadata │  │
 │   └───────────────┘     │ status        │    │ amount    │    └──────────┘  │
-│                         └───────────────┘    └───────────┘                   │
+│                         └───────────────┘    │ archived  │                   │
+│                                              └───────────┘                   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -277,9 +278,9 @@ This document describes how data flows through the Cardano Administration Data S
    │  3. INSERT milestones (for each milestone in array)                   │
    │     ┌──────────────────────────────────────────────────────────────┐  │
    │     │ INSERT INTO treasury.milestones                              │  │
-   │     │   (vendor_contract_id, milestone_id, label, amount, status)  │  │
-   │     │ VALUES (1, 'm1', 'Phase 1', 1000000, 'pending')              │  │
-   │     │ VALUES (1, 'm2', 'Phase 2', 2000000, 'pending')              │  │
+   │     │   (vendor_contract_id, milestone_id, label, amount)          │  │
+   │     │ VALUES (1, 'm1', 'Phase 1', 1000000)                         │  │
+   │     │ VALUES (1, 'm2', 'Phase 2', 2000000)                         │  │
    │     └──────────────────────────────────────────────────────────────┘  │
    │                                      │                                 │
    │                                      ▼                                 │
@@ -347,9 +348,9 @@ This document describes how data flows through the Cardano Administration Data S
                                       │ UTXO₂ is spent
                                       ▼
    ┌─────────────────────────────────────────────────────────────────────────┐
-   │                       DISBURSE TRANSACTION                              │
+   │                       WITHDRAW TRANSACTION                              │
    │  tx_hash: "ghi789"                                                      │
-   │  metadata: { "event": "disburse" }                                      │
+   │  metadata: { "event": "withdraw", "milestone": "m1" }                   │
    │            (NO project_id!)                                             │
    │                                                                         │
    │  inputs:                                                                │
@@ -359,6 +360,7 @@ This document describes how data flows through the Cardano Administration Data S
    │      1. Get inputs: [(def456, 0)]                                      │
    │      2. Lookup treasury.utxos WHERE tx_hash="def456" AND index=0       │
    │      3. Found! vendor_contract_id = 1                                  │
+   │      4. UPDATE milestones SET withdrawn=TRUE WHERE milestone_id='m1'   │
    └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -410,11 +412,11 @@ This document describes how data flows through the Cardano Administration Data S
    │       "status": "active",                                               │
    │       "initial_amount_lovelace": 1000000000000,                         │
    │       "initial_amount_ada": 1000000.0,                                  │
-   │       "milestones_summary": { "total": 5, "disbursed": 2 },             │
+   │       "milestones_summary": { "total": 5, "withdrawn": 2 },             │
    │       "financials": {                                                   │
    │         "total_allocated_ada": 1000000.0,                               │
-   │         "total_disbursed_ada": 400000.0,                                │
-   │         "disbursement_percentage": 40.0                                 │
+   │         "total_withdrawn_ada": 400000.0,                                │
+   │         "withdrawal_percentage": 40.0                                   │
    │       }                                                                 │
    │     },                                                                  │
    │     "meta": { "timestamp": "2026-01-28T10:30:00Z" }                     │
@@ -462,10 +464,14 @@ This document describes how data flows through the Cardano Administration Data S
    │ vendor_contract_id  │
    │ milestone_id        │
    │ label               │
-   │ status              │
    │ amount_lovelace     │
+   │ time_limit          │
+   │ withdrawn           │
+   │ evidence_provided   │
+   │ archived            │
+   │ withdraw_tx_hash    │
    │ complete_tx_hash    │
-   │ disburse_tx_hash    │
+   │ superseded_by       │
    └─────────────────────┘
 
    ┌─────────────────────┐

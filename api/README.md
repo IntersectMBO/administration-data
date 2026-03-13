@@ -224,16 +224,16 @@ curl "http://localhost:8080/api/v1/vendor-contracts?status=active&search=communi
         "total": 5,
         "pending": 2,
         "completed": 2,
-        "disbursed": 1
+        "withdrawn": 1
       },
       "financials": {
         "total_allocated_lovelace": 1000000000000,
         "total_allocated_ada": 1000000.0,
-        "total_disbursed_lovelace": 400000000000,
-        "total_disbursed_ada": 400000.0,
+        "total_withdrawn_lovelace": 400000000000,
+        "total_withdrawn_ada": 400000.0,
         "current_balance_lovelace": 600000000000,
         "current_balance_ada": 600000.0,
-        "disbursement_percentage": 40.0,
+        "withdrawal_percentage": 40.0,
         "utxo_count": 3
       },
       "treasury": {
@@ -288,19 +288,23 @@ Get all milestones for a specific project.
       "acceptance_criteria": "Deliver research report",
       "amount_lovelace": 200000000000,
       "amount_ada": 200000.0,
-      "status": "disbursed",
+      "time_limit": 1704240000000,
+      "withdrawn": true,
+      "evidence_provided": true,
+      "archived": false,
       "completion": {
         "tx_hash": "abc123...",
         "time": 1704067200,
         "description": "Research completed successfully",
         "evidence": [...]
       },
-      "disbursement": {
+      "withdrawal": {
         "tx_hash": "def456...",
         "time": 1704153600,
         "amount_lovelace": 200000000000,
         "amount_ada": 200000.0
       },
+      "archive_info": null,
       "project": {
         "project_id": "EC-0008-25",
         "project_name": "Community Hub Development"
@@ -341,9 +345,11 @@ List all milestones across all projects.
 |-----------|------|---------|-------------|
 | `page` | integer | 1 | Page number |
 | `limit` | integer | 50 | Results per page |
-| `status` | string | - | Filter by status: `pending`, `completed`, `disbursed` |
+| `withdrawn` | boolean | - | Filter by withdrawn status |
+| `evidence_provided` | boolean | - | Filter by evidence provided status |
+| `archived` | boolean | false | Filter by archived status (defaults to false) |
 | `project_id` | string | - | Filter by project ID |
-| `sort` | string | - | Sort field: `milestone_order`, `complete_time`, `disburse_time`, `amount` |
+| `sort` | string | - | Sort field: `milestone_order`, `complete_time`, `withdraw_time`, `amount` |
 
 #### `GET /api/v1/milestones/:id`
 
@@ -458,7 +464,7 @@ Get comprehensive statistics across all data.
       "total_count": 50,
       "pending_count": 20,
       "completed_count": 15,
-      "disbursed_count": 15
+      "withdrawn_count": 15
     },
     "events": {
       "total_count": 45,
@@ -475,8 +481,8 @@ Get comprehensive statistics across all data.
     "financials": {
       "total_allocated_lovelace": 5000000000000,
       "total_allocated_ada": 5000000.0,
-      "total_disbursed_lovelace": 2000000000000,
-      "total_disbursed_ada": 2000000.0,
+      "total_withdrawn_lovelace": 2000000000000,
+      "total_withdrawn_ada": 2000000.0,
       "current_balance_lovelace": 3000000000000,
       "current_balance_ada": 3000000.0
     },
@@ -501,9 +507,9 @@ The API tracks the following Treasury Oversight Metadata (TOM) events:
 | `publish` | Publish a treasury contract |
 | `initialize` | Initialize a treasury contract |
 | `fund` | Fund a vendor contract from treasury |
-| `complete` | Mark a milestone as complete |
-| `disburse` | Disburse funds for a completed milestone |
-| `withdraw` | Withdraw funds |
+| `complete` | Submit evidence of milestone completion |
+| `disburse` | Disburse funds from treasury (treasury-level) |
+| `withdraw` | Vendor withdraws matured milestone funds (milestone-level) |
 | `pause` | Pause a contract |
 | `resume` | Resume a paused contract |
 | `modify` | Modify contract parameters |
@@ -593,5 +599,5 @@ The API queries the `treasury` schema:
 | `v_treasury_summary` | Treasury with statistics and financials |
 | `v_vendor_contracts_summary` | Projects with milestone counts and financials |
 | `v_events_with_context` | Events with treasury/project/milestone context |
-| `v_financial_summary` | Allocated vs disbursed vs remaining |
+| `v_financial_summary` | Allocated vs withdrawn vs remaining |
 | `v_milestone_timeline` | Milestones with project context |

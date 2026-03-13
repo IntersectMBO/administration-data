@@ -355,10 +355,10 @@ pub struct MilestonesSummary {
     pub total: i64,
     /// Pending milestones
     pub pending: i64,
-    /// Completed milestones (but not yet disbursed)
+    /// Completed milestones (evidence provided but not yet withdrawn)
     pub completed: i64,
-    /// Disbursed milestones
-    pub disbursed: i64,
+    /// Withdrawn milestones
+    pub withdrawn: i64,
 }
 
 /// Vendor contract financial summary
@@ -368,16 +368,16 @@ pub struct VendorFinancials {
     pub total_allocated_lovelace: i64,
     /// Total allocated amount in ADA
     pub total_allocated_ada: f64,
-    /// Total disbursed amount in lovelace
-    pub total_disbursed_lovelace: i64,
-    /// Total disbursed amount in ADA
-    pub total_disbursed_ada: f64,
+    /// Total withdrawn amount in lovelace
+    pub total_withdrawn_lovelace: i64,
+    /// Total withdrawn amount in ADA
+    pub total_withdrawn_ada: f64,
     /// Current balance in lovelace (from UTXOs)
     pub current_balance_lovelace: i64,
     /// Current balance in ADA
     pub current_balance_ada: f64,
-    /// Disbursement percentage
-    pub disbursement_percentage: f64,
+    /// Withdrawal percentage
+    pub withdrawal_percentage: f64,
     /// UTXO count
     pub utxo_count: i64,
 }
@@ -417,8 +417,8 @@ pub struct VendorContractSummaryRow {
     pub total_milestones: Option<i64>,
     pub pending_milestones: Option<i64>,
     pub completed_milestones: Option<i64>,
-    pub disbursed_milestones: Option<i64>,
-    pub total_disbursed_lovelace: Option<i64>,
+    pub withdrawn_milestones: Option<i64>,
+    pub total_withdrawn_lovelace: Option<i64>,
     pub current_balance_lovelace: Option<i64>,
     pub utxo_count: Option<i64>,
     pub last_event_time: Option<i64>,
@@ -428,10 +428,10 @@ pub struct VendorContractSummaryRow {
 impl From<VendorContractSummaryRow> for VendorContractSummary {
     fn from(row: VendorContractSummaryRow) -> Self {
         let initial_amount = row.initial_amount_lovelace.unwrap_or(0);
-        let total_disbursed = row.total_disbursed_lovelace.unwrap_or(0);
+        let total_withdrawn = row.total_withdrawn_lovelace.unwrap_or(0);
         let current_balance = row.current_balance_lovelace.unwrap_or(0);
-        let disbursement_pct = if initial_amount > 0 {
-            (total_disbursed as f64 / initial_amount as f64) * 100.0
+        let withdrawal_pct = if initial_amount > 0 {
+            (total_withdrawn as f64 / initial_amount as f64) * 100.0
         } else {
             0.0
         };
@@ -454,16 +454,16 @@ impl From<VendorContractSummaryRow> for VendorContractSummary {
                 total: row.total_milestones.unwrap_or(0),
                 pending: row.pending_milestones.unwrap_or(0),
                 completed: row.completed_milestones.unwrap_or(0),
-                disbursed: row.disbursed_milestones.unwrap_or(0),
+                withdrawn: row.withdrawn_milestones.unwrap_or(0),
             },
             financials: VendorFinancials {
                 total_allocated_lovelace: initial_amount,
                 total_allocated_ada: lovelace_to_ada(initial_amount),
-                total_disbursed_lovelace: total_disbursed,
-                total_disbursed_ada: lovelace_to_ada(total_disbursed),
+                total_withdrawn_lovelace: total_withdrawn,
+                total_withdrawn_ada: lovelace_to_ada(total_withdrawn),
                 current_balance_lovelace: current_balance,
                 current_balance_ada: lovelace_to_ada(current_balance),
-                disbursement_percentage: disbursement_pct,
+                withdrawal_percentage: withdrawal_pct,
                 utxo_count: row.utxo_count.unwrap_or(0),
             },
             treasury: TreasuryReference {
@@ -479,10 +479,10 @@ impl From<VendorContractSummaryRow> for VendorContractSummary {
 impl From<VendorContractSummaryRow> for VendorContractDetail {
     fn from(row: VendorContractSummaryRow) -> Self {
         let initial_amount = row.initial_amount_lovelace.unwrap_or(0);
-        let total_disbursed = row.total_disbursed_lovelace.unwrap_or(0);
+        let total_withdrawn = row.total_withdrawn_lovelace.unwrap_or(0);
         let current_balance = row.current_balance_lovelace.unwrap_or(0);
-        let disbursement_pct = if initial_amount > 0 {
-            (total_disbursed as f64 / initial_amount as f64) * 100.0
+        let withdrawal_pct = if initial_amount > 0 {
+            (total_withdrawn as f64 / initial_amount as f64) * 100.0
         } else {
             0.0
         };
@@ -506,16 +506,16 @@ impl From<VendorContractSummaryRow> for VendorContractDetail {
                 total: row.total_milestones.unwrap_or(0),
                 pending: row.pending_milestones.unwrap_or(0),
                 completed: row.completed_milestones.unwrap_or(0),
-                disbursed: row.disbursed_milestones.unwrap_or(0),
+                withdrawn: row.withdrawn_milestones.unwrap_or(0),
             },
             financials: VendorFinancials {
                 total_allocated_lovelace: initial_amount,
                 total_allocated_ada: lovelace_to_ada(initial_amount),
-                total_disbursed_lovelace: total_disbursed,
-                total_disbursed_ada: lovelace_to_ada(total_disbursed),
+                total_withdrawn_lovelace: total_withdrawn,
+                total_withdrawn_ada: lovelace_to_ada(total_withdrawn),
                 current_balance_lovelace: current_balance,
                 current_balance_ada: lovelace_to_ada(current_balance),
-                disbursement_percentage: disbursement_pct,
+                withdrawal_percentage: withdrawal_pct,
                 utxo_count: row.utxo_count.unwrap_or(0),
             },
             treasury: TreasuryReference {
@@ -553,12 +553,20 @@ pub struct MilestoneResponse {
     pub amount_lovelace: Option<i64>,
     /// Allocated amount in ADA
     pub amount_ada: Option<f64>,
-    /// Milestone status (pending/completed/disbursed)
-    pub status: String,
+    /// Time limit (POSIXTime in milliseconds)
+    pub time_limit: Option<i64>,
+    /// Whether the vendor has withdrawn funds
+    pub withdrawn: bool,
+    /// Whether completion evidence has been provided
+    pub evidence_provided: bool,
+    /// Whether this milestone has been archived (replaced by a modify event)
+    pub archived: bool,
     /// Completion details
     pub completion: Option<MilestoneCompletion>,
-    /// Disbursement details
-    pub disbursement: Option<MilestoneDisbursement>,
+    /// Withdrawal details
+    pub withdrawal: Option<MilestoneWithdrawal>,
+    /// Archive info (present when archived)
+    pub archive_info: Option<MilestoneArchiveInfo>,
     /// Project reference
     pub project: ProjectReference,
 }
@@ -576,17 +584,28 @@ pub struct MilestoneCompletion {
     pub evidence: Option<serde_json::Value>,
 }
 
-/// Milestone disbursement details
+/// Milestone withdrawal details
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct MilestoneDisbursement {
-    /// Disbursement transaction hash
+pub struct MilestoneWithdrawal {
+    /// Withdrawal transaction hash
     pub tx_hash: String,
-    /// Disbursement time (Unix timestamp)
+    /// Withdrawal time (Unix timestamp)
     pub time: Option<i64>,
-    /// Disbursed amount in lovelace
+    /// Withdrawn amount in lovelace
     pub amount_lovelace: Option<i64>,
-    /// Disbursed amount in ADA
+    /// Withdrawn amount in ADA
     pub amount_ada: Option<f64>,
+}
+
+/// Milestone archive info (present when milestone has been superseded by a modify event)
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct MilestoneArchiveInfo {
+    /// Transaction hash of the modify event that archived this milestone
+    pub archived_by_tx_hash: Option<String>,
+    /// Time the milestone was archived
+    pub archived_at: Option<i64>,
+    /// ID of the new milestone that replaced this one
+    pub superseded_by_id: Option<i32>,
 }
 
 /// Project reference
@@ -610,14 +629,20 @@ pub struct MilestoneRow {
     pub description: Option<String>,
     pub acceptance_criteria: Option<String>,
     pub amount_lovelace: Option<i64>,
-    pub status: String,
+    pub time_limit: Option<i64>,
+    pub withdrawn: bool,
+    pub evidence_provided: bool,
+    pub archived: bool,
     pub complete_tx_hash: Option<String>,
     pub complete_time: Option<i64>,
     pub complete_description: Option<String>,
     pub evidence: Option<serde_json::Value>,
-    pub disburse_tx_hash: Option<String>,
-    pub disburse_time: Option<i64>,
-    pub disburse_amount: Option<i64>,
+    pub withdraw_tx_hash: Option<String>,
+    pub withdraw_time: Option<i64>,
+    pub withdraw_amount: Option<i64>,
+    pub archived_by_tx_hash: Option<String>,
+    pub archived_at: Option<i64>,
+    pub superseded_by: Option<i32>,
     pub project_id: String,
     pub project_name: Option<String>,
 }
@@ -631,12 +656,22 @@ impl From<MilestoneRow> for MilestoneResponse {
             evidence: row.evidence.clone(),
         });
 
-        let disbursement = row.disburse_tx_hash.as_ref().map(|tx| MilestoneDisbursement {
+        let withdrawal = row.withdraw_tx_hash.as_ref().map(|tx| MilestoneWithdrawal {
             tx_hash: tx.clone(),
-            time: row.disburse_time,
-            amount_lovelace: row.disburse_amount,
-            amount_ada: row.disburse_amount.map(lovelace_to_ada),
+            time: row.withdraw_time,
+            amount_lovelace: row.withdraw_amount,
+            amount_ada: row.withdraw_amount.map(lovelace_to_ada),
         });
+
+        let archive_info = if row.archived {
+            Some(MilestoneArchiveInfo {
+                archived_by_tx_hash: row.archived_by_tx_hash,
+                archived_at: row.archived_at,
+                superseded_by_id: row.superseded_by,
+            })
+        } else {
+            None
+        };
 
         Self {
             id: row.id,
@@ -647,9 +682,13 @@ impl From<MilestoneRow> for MilestoneResponse {
             acceptance_criteria: row.acceptance_criteria,
             amount_lovelace: row.amount_lovelace,
             amount_ada: row.amount_lovelace.map(lovelace_to_ada),
-            status: row.status,
+            time_limit: row.time_limit,
+            withdrawn: row.withdrawn,
+            evidence_provided: row.evidence_provided,
+            archived: row.archived,
             completion,
-            disbursement,
+            withdrawal,
+            archive_info,
             project: ProjectReference {
                 project_id: row.project_id,
                 project_name: row.project_name,
@@ -923,10 +962,10 @@ pub struct FinancialStats {
     pub total_allocated_lovelace: i64,
     /// Total allocated to projects in ADA
     pub total_allocated_ada: f64,
-    /// Total disbursed in lovelace
-    pub total_disbursed_lovelace: i64,
-    /// Total disbursed in ADA
-    pub total_disbursed_ada: f64,
+    /// Total withdrawn in lovelace
+    pub total_withdrawn_lovelace: i64,
+    /// Total withdrawn in ADA
+    pub total_withdrawn_ada: f64,
     /// Current total balance in lovelace (from UTXOs)
     pub current_balance_lovelace: i64,
     /// Current total balance in ADA
@@ -1019,11 +1058,15 @@ pub struct MilestonesQuery {
     /// Items per page
     #[serde(default = "default_limit")]
     pub limit: u32,
-    /// Filter by status (pending/completed/disbursed)
-    pub status: Option<String>,
+    /// Filter by withdrawn status
+    pub withdrawn: Option<bool>,
+    /// Filter by evidence_provided status
+    pub evidence_provided: Option<bool>,
+    /// Filter by archived status (defaults to false if not specified)
+    pub archived: Option<bool>,
     /// Filter by project ID
     pub project_id: Option<String>,
-    /// Sort field (milestone_order, complete_time, disburse_time)
+    /// Sort field (milestone_order, complete_time, withdraw_time)
     pub sort: Option<String>,
 }
 

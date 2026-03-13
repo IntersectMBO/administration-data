@@ -117,10 +117,10 @@ async fn get_milestone_stats(pool: &PgPool) -> Result<MilestoneStats, StatusCode
     let row = sqlx::query_as::<_, (i64, i64, i64, i64)>(
         r#"
         SELECT
-            COUNT(*),
-            COUNT(*) FILTER (WHERE status = 'pending'),
-            COUNT(*) FILTER (WHERE status = 'completed'),
-            COUNT(*) FILTER (WHERE status = 'withdrawn')
+            COUNT(*) FILTER (WHERE NOT archived),
+            COUNT(*) FILTER (WHERE NOT archived AND NOT evidence_provided AND NOT withdrawn),
+            COUNT(*) FILTER (WHERE NOT archived AND evidence_provided AND NOT withdrawn),
+            COUNT(*) FILTER (WHERE NOT archived AND withdrawn)
         FROM treasury.milestones
         "#
     )
@@ -185,9 +185,9 @@ async fn get_financial_stats(pool: &PgPool) -> Result<FinancialStats, StatusCode
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    // Get total disbursed
-    let (total_disbursed,): (Option<i64>,) = sqlx::query_as(
-        "SELECT COALESCE(SUM(disburse_amount), 0)::BIGINT FROM treasury.milestones WHERE status = 'disbursed'"
+    // Get total withdrawn
+    let (total_withdrawn,): (Option<i64>,) = sqlx::query_as(
+        "SELECT COALESCE(SUM(withdraw_amount), 0)::BIGINT FROM treasury.milestones WHERE withdrawn AND NOT archived"
     )
     .fetch_one(pool)
     .await
@@ -208,14 +208,14 @@ async fn get_financial_stats(pool: &PgPool) -> Result<FinancialStats, StatusCode
     })?;
 
     let allocated = total_allocated.unwrap_or(0);
-    let disbursed = total_disbursed.unwrap_or(0);
+    let withdrawn = total_withdrawn.unwrap_or(0);
     let balance = current_balance.unwrap_or(0);
 
     Ok(FinancialStats {
         total_allocated_lovelace: allocated,
         total_allocated_ada: lovelace_to_ada(allocated),
-        total_disbursed_lovelace: disbursed,
-        total_disbursed_ada: lovelace_to_ada(disbursed),
+        total_withdrawn_lovelace: withdrawn,
+        total_withdrawn_ada: lovelace_to_ada(withdrawn),
         current_balance_lovelace: balance,
         current_balance_ada: lovelace_to_ada(balance),
     })

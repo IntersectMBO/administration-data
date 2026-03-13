@@ -4,7 +4,7 @@ use utoipa::OpenApi;
 
 use crate::models::v1::{
     ApiResponse, EventMilestoneContext, EventProjectContext, EventResponse, EventStats,
-    EventTreasuryContext, EventsQuery, FinancialStats, MilestoneCompletion, MilestoneDisbursement,
+    EventTreasuryContext, EventsQuery, FinancialStats, MilestoneArchiveInfo, MilestoneCompletion, MilestoneWithdrawal,
     MilestoneResponse, MilestoneStats, MilestonesSummary, MilestonesQuery, PaginatedResponse,
     Pagination, ProjectEventsQuery, ProjectReference, ProjectStats, RecentEventsQuery,
     ResponseMeta, StatisticsResponse, StatusResponse, SyncStats, TreasuryFinancials,
@@ -88,7 +88,8 @@ use crate::routes::v1::{
             // Milestones
             MilestoneResponse,
             MilestoneCompletion,
-            MilestoneDisbursement,
+            MilestoneWithdrawal,
+            MilestoneArchiveInfo,
             ProjectReference,
             // Events
             EventResponse,

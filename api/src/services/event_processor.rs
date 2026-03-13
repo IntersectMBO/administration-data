@@ -273,10 +273,10 @@ impl EventProcessor {
                     r#"
                     INSERT INTO treasury.milestones (
                         vendor_contract_id, milestone_id, milestone_order, label,
-                        description, acceptance_criteria, amount_lovelace, status
+                        description, acceptance_criteria, amount_lovelace
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
-                    ON CONFLICT (vendor_contract_id, milestone_id) DO NOTHING
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (vendor_contract_id, milestone_id) WHERE NOT archived DO NOTHING
                     "#
                 )
                 .bind(vendor_contract_id)
@@ -370,12 +370,12 @@ impl EventProcessor {
                     let db_milestone_id: Option<i32> = sqlx::query_scalar(
                         r#"
                         UPDATE treasury.milestones
-                        SET status = 'completed',
+                        SET evidence_provided = TRUE,
                             complete_tx_hash = $1,
                             complete_time = $2,
                             complete_description = $3,
                             evidence = $4
-                        WHERE vendor_contract_id = $5 AND milestone_id = $6
+                        WHERE vendor_contract_id = $5 AND milestone_id = $6 AND NOT archived
                         RETURNING id
                         "#
                     )
@@ -400,10 +400,10 @@ impl EventProcessor {
             sqlx::query(
                 r#"
                 UPDATE treasury.milestones
-                SET status = 'completed',
+                SET evidence_provided = TRUE,
                     complete_tx_hash = $1,
                     complete_time = $2
-                WHERE vendor_contract_id = $3 AND milestone_id = $4 AND status = 'pending'
+                WHERE vendor_contract_id = $3 AND milestone_id = $4 AND NOT archived
                 "#
             )
             .bind(&event.tx_hash)
@@ -417,7 +417,7 @@ impl EventProcessor {
         Ok(())
     }
 
-    /// Process a disburse event - update milestone status
+    /// Process a disburse event - treasury-level fund movement (does not touch milestones)
     async fn process_disburse(&self, event: &RawTomEvent, body: &Value) -> anyhow::Result<()> {
         let event_body = body.get("body").unwrap_or(body);
 
@@ -439,45 +439,13 @@ impl EventProcessor {
             self.find_vendor_contract_from_inputs(&event.tx_hash).await?
         };
 
-        // Get disbursed amount from tx outputs - cast SUM to BIGINT
-        let disburse_amount: Option<i64> = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(lovelace_amount)::bigint, 0) FROM yaci_store.address_utxo WHERE tx_hash = $1 AND owner_addr NOT LIKE 'addr1x%'"
-        )
-        .bind(&event.tx_hash)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        // Check for milestone field and update if present
-        let db_milestone_id: Option<i32> = if let (Some(vc_id), Some(milestone_id)) = (vendor_contract_id, event_body.get("milestone").and_then(|m| m.as_str())) {
-            sqlx::query_scalar(
-                r#"
-                UPDATE treasury.milestones
-                SET status = 'disbursed',
-                    disburse_tx_hash = $1,
-                    disburse_time = $2,
-                    disburse_amount = $3
-                WHERE vendor_contract_id = $4 AND milestone_id = $5
-                RETURNING id
-                "#
-            )
-            .bind(&event.tx_hash)
-            .bind(event.block_time)
-            .bind(disburse_amount)
-            .bind(vc_id)
-            .bind(milestone_id)
-            .fetch_optional(&self.pool)
-            .await?
-        } else {
-            None
-        };
-
-        // Always insert the disburse event (may be treasury-level without vendor_contract)
-        self.insert_event_with_destination(event, "disburse", None, vendor_contract_id, db_milestone_id, &destination, body).await?;
+        // Insert the disburse event (treasury-level, never updates milestones)
+        self.insert_event_with_destination(event, "disburse", None, vendor_contract_id, None, &destination, body).await?;
 
         Ok(())
     }
 
-    /// Process a withdraw event
+    /// Process a withdraw event - vendor claims matured milestone funds
     async fn process_withdraw(&self, event: &RawTomEvent, body: &Value) -> anyhow::Result<()> {
         let event_body = body.get("body").unwrap_or(body);
 
@@ -498,7 +466,39 @@ impl EventProcessor {
         };
 
         if let Some(vc_id) = vendor_contract_id {
-            self.insert_event(event, "withdraw", None, Some(vc_id), None, body).await?;
+            // Get withdraw amount from tx outputs (non-script addresses)
+            let withdraw_amount: Option<i64> = sqlx::query_scalar(
+                "SELECT COALESCE(SUM(lovelace_amount)::bigint, 0) FROM yaci_store.address_utxo WHERE tx_hash = $1 AND owner_addr NOT LIKE 'addr1x%'"
+            )
+            .bind(&event.tx_hash)
+            .fetch_optional(&self.pool)
+            .await?;
+
+            // Update milestone if milestone field is present in metadata
+            let db_milestone_id: Option<i32> = if let Some(milestone_id) = event_body.get("milestone").and_then(|m| m.as_str()) {
+                sqlx::query_scalar(
+                    r#"
+                    UPDATE treasury.milestones
+                    SET withdrawn = TRUE,
+                        withdraw_tx_hash = $1,
+                        withdraw_time = $2,
+                        withdraw_amount = $3
+                    WHERE vendor_contract_id = $4 AND milestone_id = $5 AND NOT archived
+                    RETURNING id
+                    "#
+                )
+                .bind(&event.tx_hash)
+                .bind(event.block_time)
+                .bind(withdraw_amount)
+                .bind(vc_id)
+                .bind(milestone_id)
+                .fetch_optional(&self.pool)
+                .await?
+            } else {
+                None
+            };
+
+            self.insert_event(event, "withdraw", None, Some(vc_id), db_milestone_id, body).await?;
         } else {
             tracing::debug!("Could not find vendor contract for withdraw event {}", event.tx_hash);
         }
@@ -582,7 +582,7 @@ impl EventProcessor {
         Ok(())
     }
 
-    /// Process a modify event - update vendor contract
+    /// Process a modify event - update vendor contract, archive and replace milestones
     async fn process_modify(&self, event: &RawTomEvent, body: &Value) -> anyhow::Result<()> {
         let event_body = body.get("body").unwrap_or(body);
 
@@ -604,6 +604,70 @@ impl EventProcessor {
         };
 
         if let Some(vc_id) = vendor_contract_id {
+            // If milestones are present in the modify metadata, archive existing and insert new
+            if let Some(milestones) = event_body.get("milestones").and_then(|m| m.as_array()) {
+                // Archive all active milestones for this vendor contract
+                sqlx::query(
+                    r#"
+                    UPDATE treasury.milestones
+                    SET archived = TRUE, archived_by_tx_hash = $1, archived_at = $2
+                    WHERE vendor_contract_id = $3 AND NOT archived
+                    "#
+                )
+                .bind(&event.tx_hash)
+                .bind(event.block_time)
+                .bind(vc_id)
+                .execute(&self.pool)
+                .await?;
+
+                // Insert new milestone rows
+                for (idx, milestone) in milestones.iter().enumerate() {
+                    let default_id = format!("m-{}", idx);
+                    let milestone_id = milestone.get("identifier")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or(&default_id);
+                    let label = extract_text_from_value(Some(milestone.get("label").unwrap_or(&Value::Null)));
+                    let description = extract_text_from_value(Some(milestone.get("description").unwrap_or(&Value::Null)));
+                    let acceptance_criteria = extract_text_from_value(Some(milestone.get("acceptanceCriteria").unwrap_or(&Value::Null)));
+                    let amount = milestone.get("amount")
+                        .and_then(|a| a.as_i64());
+
+                    let new_id: i32 = sqlx::query_scalar(
+                        r#"
+                        INSERT INTO treasury.milestones (
+                            vendor_contract_id, milestone_id, milestone_order, label,
+                            description, acceptance_criteria, amount_lovelace
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                        RETURNING id
+                        "#
+                    )
+                    .bind(vc_id)
+                    .bind(milestone_id)
+                    .bind((idx + 1) as i32)
+                    .bind(&label)
+                    .bind(&description)
+                    .bind(&acceptance_criteria)
+                    .bind(amount)
+                    .fetch_one(&self.pool)
+                    .await?;
+
+                    // Update superseded_by on the archived row that matches this milestone_id
+                    sqlx::query(
+                        r#"
+                        UPDATE treasury.milestones
+                        SET superseded_by = $1
+                        WHERE vendor_contract_id = $2 AND milestone_id = $3 AND archived AND superseded_by IS NULL
+                        "#
+                    )
+                    .bind(new_id)
+                    .bind(vc_id)
+                    .bind(milestone_id)
+                    .execute(&self.pool)
+                    .await?;
+                }
+            }
+
             self.insert_event_with_reason(event, "modify", None, Some(vc_id), None, &reason, body).await?;
         } else {
             tracing::debug!("Could not find vendor contract for modify event {}", event.tx_hash);

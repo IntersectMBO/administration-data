@@ -237,19 +237,25 @@ pub async fn get_vendor_contract_milestones(
             m.description,
             m.acceptance_criteria,
             m.amount_lovelace,
-            m.status,
+            m.time_limit,
+            m.withdrawn,
+            m.evidence_provided,
+            m.archived,
             m.complete_tx_hash,
             m.complete_time,
             m.complete_description,
             m.evidence,
-            m.disburse_tx_hash,
-            m.disburse_time,
-            m.disburse_amount,
+            m.withdraw_tx_hash,
+            m.withdraw_time,
+            m.withdraw_amount,
+            m.archived_by_tx_hash,
+            m.archived_at,
+            m.superseded_by,
             vc.project_id,
             vc.project_name
         FROM treasury.milestones m
         JOIN treasury.vendor_contracts vc ON vc.id = m.vendor_contract_id
-        WHERE vc.project_id = $1
+        WHERE vc.project_id = $1 AND NOT m.archived
         ORDER BY m.milestone_order
         "#
     )
