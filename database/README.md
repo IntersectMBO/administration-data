@@ -38,9 +38,9 @@ Stores vendor/project contract instances (PSSC).
 | other_identifiers | TEXT[] | Related IDs |
 | project_name | TEXT | Project label |
 | description | TEXT | Project description |
-| vendor_name | TEXT | Vendor name |
+| vendor_name | TEXT | DEPRECATED: always null (TOM spec has no vendor.name) |
 | vendor_address | TEXT | Payment destination |
-| contract_url | TEXT | Link to agreement |
+| contract_url | TEXT | DEPRECATED: always null (no on-chain data available) |
 | contract_address | TEXT | PSSC script address |
 | fund_tx_hash | VARCHAR(64) | Fund transaction |
 | fund_slot | BIGINT | Fund slot |
@@ -49,7 +49,7 @@ Stores vendor/project contract instances (PSSC).
 | status | TEXT | active/paused/completed/cancelled |
 
 ### treasury.milestones
-Stores milestone data for each vendor contract. Uses 3 independent boolean flags instead of a linear status.
+Stores milestone data for each vendor contract. Uses 4 independent boolean flags instead of a linear status.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -134,7 +134,9 @@ Treasury contracts with aggregated statistics and financials.
 SELECT * FROM treasury.v_treasury_summary;
 ```
 
-Fields: treasury_id, contract_instance, contract_address, stake_credential, name, status, publish_tx_hash, publish_time, initialized_tx_hash, initialized_at, permissions, vendor_contract_count, active_contracts, completed_contracts, cancelled_contracts, treasury_balance, utxo_count, total_events, last_event_time, created_at, updated_at
+Fields: treasury_id, contract_instance, contract_address, stake_credential, status, publish_tx_hash, publish_time, initialized_tx_hash, initialized_at, permissions, vendor_contract_count, active_contracts, completed_contracts, cancelled_contracts, treasury_balance, utxo_count, total_events, last_event_time, created_at, updated_at
+
+Note: `treasury_balance` and `utxo_count` are sourced from `yaci_store.address_utxo` (live unspent UTXOs), not from `treasury.utxos`.
 
 ### treasury.v_vendor_contracts_summary
 Vendor contracts with milestone counts, financials, and UTXO balance.
@@ -143,7 +145,7 @@ Vendor contracts with milestone counts, financials, and UTXO balance.
 SELECT * FROM treasury.v_vendor_contracts_summary;
 ```
 
-Fields: id, treasury_id, project_id, other_identifiers, project_name, description, vendor_name, vendor_address, contract_url, contract_address, fund_tx_hash, fund_slot, fund_block_time, initial_amount_lovelace, status, created_at, updated_at, treasury_instance, total_milestones, pending_milestones, completed_milestones, withdrawn_milestones, total_withdrawn_lovelace, current_balance_lovelace, utxo_count, last_event_time, event_count
+Fields: id, treasury_id, project_id, other_identifiers, project_name, description, vendor_address, contract_address, fund_tx_hash, fund_slot, fund_block_time, initial_amount_lovelace, status, created_at, updated_at, treasury_instance, total_milestones, pending_milestones, completed_milestones, withdrawn_milestones, paused_milestones, total_withdrawn_lovelace, current_balance_lovelace, utxo_count, last_event_time, event_count
 
 ### treasury.v_events_with_context
 Events with full treasury/project/milestone context.
@@ -152,7 +154,7 @@ Events with full treasury/project/milestone context.
 SELECT * FROM treasury.v_events_with_context ORDER BY block_time DESC;
 ```
 
-Fields: id, tx_hash, slot, block_number, block_time, event_type, amount_lovelace, reason, destination, metadata, created_at, treasury_instance, project_id, project_name, vendor_name, project_address, milestone_id, milestone_label, milestone_order
+Fields: id, tx_hash, slot, block_number, block_time, event_type, amount_lovelace, reason, destination, metadata, created_at, treasury_instance, project_id, project_name, project_address, milestone_id, milestone_label, milestone_order
 
 ### treasury.v_financial_summary
 Financial summary showing allocated vs withdrawn vs remaining.
@@ -220,7 +222,7 @@ The schema includes indexes for:
 - Foreign key relationships
 - Status filtering
 - Time-based ordering (fund_block_time, block_time)
-- Text search (project_id, project_name, vendor_name)
+- Text search (project_id, project_name, description)
 - UTXO queries (unspent UTXOs, address lookups)
 
 ## Example Queries
@@ -230,7 +232,6 @@ The schema includes indexes for:
 SELECT
     project_id,
     project_name,
-    vendor_name,
     initial_amount_lovelace / 1000000.0 as allocated_ada,
     total_withdrawn_lovelace / 1000000.0 as withdrawn_ada,
     current_balance_lovelace / 1000000.0 as balance_ada,

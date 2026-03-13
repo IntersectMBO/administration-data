@@ -6,7 +6,7 @@ Rust-based REST API for querying Cardano treasury fund tracking data. Built with
 
 - RESTful API with OpenAPI/Swagger documentation
 - Consistent response envelopes with pagination
-- Both lovelace AND ADA amounts in responses
+- All amounts in lovelace (1 ADA = 1,000,000 lovelace)
 - Raw metadata AND parsed/normalized data
 - Background sync service for real-time data
 
@@ -52,12 +52,11 @@ All responses use a consistent envelope:
 
 ### Amount Fields
 
-All monetary amounts include both representations:
+All monetary amounts are in lovelace (1 ADA = 1,000,000 lovelace):
 
 ```json
 {
-  "initial_amount_lovelace": 1000000000000,
-  "initial_amount_ada": 1000000.0
+  "initial_amount_lovelace": 1000000000000
 }
 ```
 
@@ -115,7 +114,6 @@ Get treasury contract details with statistics and financials.
     "contract_instance": "9e65e4ed7d6fd86fc4827d2b45da6d2c601fb920e8bfd794b8ecc619",
     "contract_address": "addr1xxzc8pt7fgf0lc0x7eq6z7z6puhsxmzktna7dluahrj6g6...",
     "stake_credential": "8583857e4a12ffe1e6f641a1785a0f2f036c565cfbe6ff9db8e5a469",
-    "name": "CC Treasury",
     "status": "active",
     "publish_tx_hash": "abc123...",
     "publish_time": 1704067200,
@@ -132,8 +130,7 @@ Get treasury contract details with statistics and financials.
       "last_event_time": 1704153600
     },
     "financials": {
-      "balance_lovelace": 264568247000000,
-      "balance_ada": 264568247.0
+      "balance_lovelace": 264568247000000
     },
     "created_at": "2024-01-01T00:00:00Z",
     "updated_at": "2024-01-15T12:00:00Z"
@@ -156,7 +153,6 @@ Get all unspent UTXOs at the treasury contract address.
       "address": "addr1x...",
       "address_type": "treasury",
       "lovelace_amount": 100000000000,
-      "ada_amount": 100000.0,
       "slot": 163964156,
       "block_number": 12296746
     }
@@ -191,7 +187,7 @@ List all vendor contracts (projects) with pagination and filtering.
 | `page` | integer | 1 | Page number (1-indexed) |
 | `limit` | integer | 50 | Results per page (max: 100) |
 | `status` | string | - | Filter by status: `active`, `paused`, `completed`, `cancelled` |
-| `search` | string | - | Search in project_id, project_name, description, vendor_name |
+| `search` | string | - | Search in project_id, project_name, description |
 | `sort` | string | `fund_time` | Sort field: `fund_time`, `project_id`, `project_name`, `initial_amount` |
 | `order` | string | `desc` | Sort order: `asc`, `desc` |
 | `from_time` | integer | - | Filter by fund time (Unix timestamp, from) |
@@ -211,34 +207,28 @@ curl "http://localhost:8080/api/v1/vendor-contracts?status=active&search=communi
       "project_id": "EC-0008-25",
       "project_name": "Community Hub Development",
       "description": "Building decentralized community infrastructure",
-      "vendor_name": "Acme Blockchain Solutions",
       "vendor_address": "addr1q...",
-      "contract_url": "https://...",
       "contract_address": "addr1x...",
       "status": "active",
       "fund_tx_hash": "abc123...",
       "fund_time": 1704067200,
       "initial_amount_lovelace": 1000000000000,
-      "initial_amount_ada": 1000000.0,
       "milestones_summary": {
         "total": 5,
         "pending": 2,
         "completed": 2,
-        "withdrawn": 1
+        "withdrawn": 1,
+        "paused": 0
       },
       "financials": {
         "total_allocated_lovelace": 1000000000000,
-        "total_allocated_ada": 1000000.0,
         "total_withdrawn_lovelace": 400000000000,
-        "total_withdrawn_ada": 400000.0,
         "current_balance_lovelace": 600000000000,
-        "current_balance_ada": 600000.0,
         "withdrawal_percentage": 40.0,
         "utxo_count": 3
       },
       "treasury": {
-        "contract_instance": "9e65e4ed...",
-        "name": "CC Treasury"
+        "contract_instance": "9e65e4ed..."
       },
       "last_event_time": 1704153600,
       "event_count": 8
@@ -287,7 +277,6 @@ Get all milestones for a specific project.
       "description": "Complete market research and requirements gathering",
       "acceptance_criteria": "Deliver research report",
       "amount_lovelace": 200000000000,
-      "amount_ada": 200000.0,
       "time_limit": 1704240000000,
       "withdrawn": true,
       "evidence_provided": true,
@@ -301,8 +290,7 @@ Get all milestones for a specific project.
       "withdrawal": {
         "tx_hash": "def456...",
         "time": 1704153600,
-        "amount_lovelace": 200000000000,
-        "amount_ada": 200000.0
+        "amount_lovelace": 200000000000
       },
       "archive_info": null,
       "project": {
@@ -392,17 +380,14 @@ List all events with full context.
       "block_time": 1704067200,
       "event_type": "fund",
       "amount_lovelace": 1000000000000,
-      "amount_ada": 1000000.0,
       "reason": null,
       "destination": null,
       "treasury": {
-        "contract_instance": "9e65e4ed...",
-        "name": "CC Treasury"
+        "contract_instance": "9e65e4ed..."
       },
       "project": {
         "project_id": "EC-0008-25",
         "project_name": "Community Hub Development",
-        "vendor_name": "Acme Blockchain Solutions",
         "contract_address": "addr1x..."
       },
       "milestone": null,
@@ -451,7 +436,8 @@ Get comprehensive statistics across all data.
   "data": {
     "treasury": {
       "total_count": 1,
-      "active_count": 1
+      "active_count": 1,
+      "disbursed_count": 3
     },
     "projects": {
       "total_count": 10,
@@ -467,7 +453,8 @@ Get comprehensive statistics across all data.
       "withdrawn_count": 15
     },
     "events": {
-      "total_count": 45,
+      "on_chain_count": 45,
+      "processed_count": 45,
       "by_type": {
         "fund": 10,
         "complete": 15,
@@ -480,11 +467,8 @@ Get comprehensive statistics across all data.
     },
     "financials": {
       "total_allocated_lovelace": 5000000000000,
-      "total_allocated_ada": 5000000.0,
       "total_withdrawn_lovelace": 2000000000000,
-      "total_withdrawn_ada": 2000000.0,
-      "current_balance_lovelace": 3000000000000,
-      "current_balance_ada": 3000000.0
+      "current_balance_lovelace": 3000000000000
     },
     "sync": {
       "last_slot": 163964156,

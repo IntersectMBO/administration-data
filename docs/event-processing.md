@@ -127,10 +127,11 @@ The `extract_text` / `extract_text_from_value` helpers handle both formats, join
 #### Code Extraction (`process_publish`)
 | Metadata Path | Extracted As | DB Column |
 |---------------|-------------|-----------|
-| `body.label` | `extract_text()` → name | `treasury_contracts.name` |
 | `body.permissions` | raw JSON clone | `treasury_contracts.permissions` |
 
-**Not extracted**: `description`, `expiration`, `payoutUpperbound`, `vendorExpiration`, `seedUtxo`
+**Not extracted**: `label`, `description`, `expiration`, `payoutUpperbound`, `vendorExpiration`, `seedUtxo`
+
+Note: `body.label` is intentionally not extracted — the name is a static label already known to API consumers.
 
 #### DB Writes
 - **UPSERT** `treasury.treasury_contracts` (keyed on `contract_instance`)
@@ -150,10 +151,10 @@ The `extract_text` / `extract_text_from_value` helpers handle both formats, join
 | `outputs` | object | Map of output indices → `{identifier, label}` |
 
 #### Code Extraction (`process_initialize`)
-Minimal — only records the tx hash and block time.
+Records the tx hash and block time. Also queries `yaci_store.address_utxo` for the first `addr1x%` output to set `contract_address`, and derives `stake_credential` from that address via bech32 decoding.
 
 #### DB Writes
-- **UPSERT** `treasury.treasury_contracts` — sets `initialized_tx_hash`, `initialized_at`
+- **UPSERT** `treasury.treasury_contracts` — sets `initialized_tx_hash`, `initialized_at`, `contract_address`, `stake_credential`
 - **INSERT** `treasury.events`
 
 **Not extracted**: `reason`, `outputs`
@@ -191,9 +192,7 @@ Minimal — only records the tx hash and block time.
 | `body.identifier` | string | `vendor_contracts.project_id` |
 | `body.label` | `extract_text()` | `vendor_contracts.project_name` |
 | `body.description` | `extract_text()` | `vendor_contracts.description` |
-| _(not extracted)_ | `None` | `vendor_contracts.vendor_name` (always null — TOM spec has no `vendor.name` field) |
 | `body.vendor.label` | `extract_text_from_value()` | `vendor_contracts.vendor_address` |
-| `body.contract` | `extract_contract()` — handles both string and `{anchorUrl}` object | `vendor_contracts.contract_url` |
 | `body.otherIdentifiers` | string array | `vendor_contracts.other_identifiers` |
 | `body.milestones[].identifier` | string | `milestones.milestone_id` |
 | `body.milestones[].label` | `extract_text_from_value()` | `milestones.label` |
@@ -206,6 +205,8 @@ Minimal — only records the tx hash and block time.
 Additionally queries `yaci_store.address_utxo` for the fund tx to get:
 - `contract_address` — first `addr1x%` output address
 - `initial_amount_lovelace` — lovelace amount of that output
+
+**Treasury address fallback**: If the treasury `contract_address` is still null, derives it from the fund tx inputs by finding the `addr1x%` input address that differs from the vendor contract output. Also derives `stake_credential` from the treasury address via bech32 decoding.
 
 **Datum integration**: After UTXO recording, queries `inline_datum` from the fund tx output (`addr1x%` address). If available, parses the CBOR datum via `parse_vendor_contract_datum()` to:
 - Store `vendor_payment_key_hash` on the vendor contract row
@@ -399,18 +400,17 @@ Additionally queries `yaci_store.address_utxo` for the withdraw tx to calculate 
 | `body.label` | `extract_text()` | `vendor_contracts.project_name` (COALESCE update) |
 | `body.description` | `extract_text()` | `vendor_contracts.description` (COALESCE update) |
 | `body.vendor.label` | `extract_text_from_value()` | `vendor_contracts.vendor_address` (COALESCE update) |
-| `body.contract` | `extract_contract()` | `vendor_contracts.contract_url` (COALESCE update) |
 | `body.reason` | `extract_text()` | `events.reason` |
 | `body.milestones` | array or object of milestones | Archives old, inserts new |
 
-**Naming fields update**: Before processing milestones, the code extracts `label`, `description`, `vendor.label`, and `contract` and updates the vendor contract row using COALESCE (only overwrites if the new value is non-null).
+**Naming fields update**: Before processing milestones, the code extracts `label`, `description`, and `vendor.label` and updates the vendor contract row using COALESCE (only overwrites if the new value is non-null).
 
 **Milestone format handling**: Same as fund — milestones are accepted in both array format (`[{identifier: "m-0", ...}]`) and object format (`{"m-0": {...}}`).
 
 Milestone field extraction is identical to fund (identifier, label, description, acceptanceCriteria, amount).
 
 #### DB Writes
-- **UPDATE** `treasury.vendor_contracts` — COALESCE update of `project_name`, `description`, `vendor_address`, `contract_url`
+- **UPDATE** `treasury.vendor_contracts` — COALESCE update of `project_name`, `description`, `vendor_address`
 - **UPDATE** `treasury.milestones` — sets `archived = TRUE`, `archived_by_tx_hash`, `archived_at` for all active milestones
 - **INSERT** `treasury.milestones` — new milestone rows
 - **UPDATE** `treasury.milestones` — sets `superseded_by` FK linking old → new rows with matching milestone_id
@@ -513,18 +513,13 @@ The TOM spec defines the `vendor` object as:
 }
 ```
 
-The code sets `vendor_name = None` explicitly — TOM spec has no `vendor.name` field, so `vendor_contracts.vendor_name` is always null. `vendor.label` is extracted via `extract_text_from_value()` into `vendor_contracts.vendor_address`.
+The TOM spec has no `vendor.name` field — `vendor_contracts.vendor_name` is a deprecated column (always null). `vendor.label` is extracted via `extract_text_from_value()` into `vendor_contracts.vendor_address`.
 
 In practice, vendor identity comes from the top-level `body.label` which by convention includes the vendor name (e.g., `"Tastenkunst GmbH - Eternl Maintenance"`). The `vendor.label` field in real metadata contains the vendor's payment address (a Cardano address), not their display name.
 
-### Contract URL Extraction
+### Contract URL
 
-The `extract_contract()` helper handles both metadata formats:
-
-- **String**: `"contract": "https://..."` — returned directly
-- **Object**: `"contract": {"anchorUrl": "https://...", "anchorDataHash": "..."}` — extracts `anchorUrl`
-
-This covers both spec-conformant metadata (object format) and simplified metadata (plain string).
+The `contract_url` column on `vendor_contracts` is deprecated (always null). Contract URL extraction was removed as no on-chain data populates this field.
 
 ### Milestone Format: Object vs Array
 
@@ -620,7 +615,7 @@ All 11 bugs have been fixed. This section documents the original issues and thei
 
 **1. ~~`sync_address_utxos()` misassigns UTXOs~~** — FIXED: Deleted `sync_utxos()` and `sync_address_utxos()`. UTXO tracking now relies exclusively on `find_vendor_contract_from_inputs()` chain tracing.
 
-**2. ~~`vendor.name` always null~~** — FIXED: Code now sets `vendor_name = None` explicitly since TOM spec has no `vendor.name` field. `vendor.label` correctly maps to `vendor_address`.
+**2. ~~`vendor.name` always null~~** — FIXED: `vendor_name` column is deprecated (always null). TOM spec has no `vendor.name` field. `vendor.label` correctly maps to `vendor_address`.
 
 ### High (Fixed)
 
@@ -630,7 +625,7 @@ All 11 bugs have been fixed. This section documents the original issues and thei
 
 **5. ~~Pause/resume are contract-level, spec says milestone-level~~** — FIXED: Added `paused` boolean flag on milestones. `process_pause`/`process_resume` now parse the output datum to determine per-milestone pause state via `update_milestone_pause_from_datum()`. Contract-level status is derived: paused if ALL milestones paused, active if none paused.
 
-**6. ~~Modify doesn't update naming fields~~** — FIXED: `process_modify` now extracts and updates `project_name`, `description`, `vendor_address`, and `contract_url` using COALESCE before processing milestones.
+**6. ~~Modify doesn't update naming fields~~** — FIXED: `process_modify` now extracts and updates `project_name`, `description`, `vendor_address` using COALESCE before processing milestones.
 
 ### Medium (Fixed)
 
@@ -640,7 +635,7 @@ All 11 bugs have been fixed. This section documents the original issues and thei
 
 **9. ~~No slot-level ordering within blocks~~** — FIXED: Added `m.tx_hash ASC` as secondary sort in both `sync_all_events` and `sync_new_events` queries.
 
-**10. ~~`contract` field extraction assumes string~~** — FIXED: Added `extract_contract()` helper that handles both `contract: "url"` (string) and `contract: {anchorUrl: "url"}` (object) formats.
+**10. ~~`contract` field extraction assumes string~~** — N/A: `contract_url` extraction was removed (deprecated column, always null).
 
 **11. ~~Withdraw handles single milestone only~~** — FIXED: `process_withdraw` now checks for `milestones` object (plural, keyed by ID) first, falling back to singular `milestone` field for legacy format.
 
@@ -658,18 +653,9 @@ JOIN treasury.vendor_contracts vc ON vc.id = e.vendor_contract_id
 WHERE vc.project_id = 'EC-0008-25' AND e.event_type = 'fund';
 
 -- Compare with stored values
-SELECT project_id, project_name, vendor_name, vendor_address, contract_url, description
+SELECT project_id, project_name, vendor_address, description
 FROM treasury.vendor_contracts
 WHERE project_id = 'EC-0008-25';
-```
-
-### Find projects with null vendor_name
-
-```sql
-SELECT project_id, project_name, vendor_name, vendor_address
-FROM treasury.vendor_contracts
-WHERE vendor_name IS NULL
-ORDER BY project_id;
 ```
 
 ### Check for duplicate contract_addresses across projects

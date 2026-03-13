@@ -223,9 +223,9 @@ This document describes how data flows through the Cardano Administration Data S
 │   ┌───────────────┐     ┌───────────────┐    ┌───────────┐    ┌──────────┐  │
 │   │ id            │     │ id            │    │ id        │    │ id       │  │
 │   │ instance      │◄────│ treasury_id   │◄───│ vendor_id │    │ tx_hash  │  │
-│   │ name          │     │ project_id    │    │ label     │    │ event    │  │
+│   │ stake_cred    │     │ project_id    │    │ label     │    │ event    │  │
 │   │ publish_tx    │     │ project_name  │    │ withdrawn │    │ metadata │  │
-│   └───────────────┘     │ status        │    │ amount    │    └──────────┘  │
+│   └───────────────┘     │ status        │    │ paused    │    └──────────┘  │
 │                         └───────────────┘    │ archived  │                   │
 │                                              └───────────┘                   │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -247,7 +247,7 @@ This document describes how data flows through the Cardano Administration Data S
    │     "identifier": "project-001",                                      │
    │     "label": "My Project",                                            │
    │     "description": "Project description...",                          │
-   │     "vendor": { "name": "Acme Corp" },                                │
+   │     "vendor": { "label": "addr1q..." },                                │
    │     "milestones": [                                                   │
    │       { "identifier": "m1", "label": "Phase 1", "amount": 1000000 },  │
    │       { "identifier": "m2", "label": "Phase 2", "amount": 2000000 }   │
@@ -270,8 +270,8 @@ This document describes how data flows through the Cardano Administration Data S
    │  2. INSERT vendor_contracts                                           │
    │     ┌──────────────────────────────────────────────────────────────┐  │
    │     │ INSERT INTO treasury.vendor_contracts                        │  │
-   │     │   (project_id, project_name, vendor_name, ...)               │  │
-   │     │ VALUES ('project-001', 'My Project', 'Acme Corp', ...)       │  │
+   │     │   (project_id, project_name, vendor_address, ...)             │  │
+   │     │ VALUES ('project-001', 'My Project', 'addr1q...', ...)       │  │
    │     └──────────────────────────────────────────────────────────────┘  │
    │                                      │                                 │
    │                                      ▼                                 │
@@ -408,14 +408,12 @@ This document describes how data flows through the Cardano Administration Data S
    │     "data": {                                                           │
    │       "project_id": "EC-0008-25",                                       │
    │       "project_name": "Community Hub Development",                      │
-   │       "vendor_name": "Acme Blockchain Solutions",                       │
    │       "status": "active",                                               │
    │       "initial_amount_lovelace": 1000000000000,                         │
-   │       "initial_amount_ada": 1000000.0,                                  │
    │       "milestones_summary": { "total": 5, "withdrawn": 2 },             │
    │       "financials": {                                                   │
-   │         "total_allocated_ada": 1000000.0,                               │
-   │         "total_withdrawn_ada": 400000.0,                                │
+   │         "total_allocated_lovelace": 1000000000000,                      │
+   │         "total_withdrawn_lovelace": 400000000000,                       │
    │         "withdrawal_percentage": 40.0                                   │
    │       }                                                                 │
    │     },                                                                  │
@@ -436,7 +434,7 @@ This document describes how data flows through the Cardano Administration Data S
    ├─────────────────────┤
    │ id (PK)             │
    │ contract_instance   │◄─────────────────────────────────────────────┐
-   │ name                │                                              │
+   │ stake_credential    │                                              │
    │ publish_tx_hash     │                                              │
    │ initialized_at      │                                              │
    └─────────────────────┘                                              │
@@ -450,7 +448,7 @@ This document describes how data flows through the Cardano Administration Data S
    │ treasury_id (FK)    │─────────│ treasury_id (FK)    │─────────────┘
    │ project_id (unique) │         │ milestone_id (FK)   │─────┐
    │ project_name        │         │ tx_hash (unique)    │     │
-   │ vendor_name         │         │ event_type          │     │
+   │ vendor_address      │         │ event_type          │     │
    │ status              │         │ slot                │     │
    │ contract_address    │         │ metadata (JSONB)    │     │
    └─────────────────────┘         └─────────────────────┘     │
