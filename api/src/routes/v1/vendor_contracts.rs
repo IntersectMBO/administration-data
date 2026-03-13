@@ -45,7 +45,7 @@ pub async fn list_vendor_contracts(
 
     if params.search.is_some() {
         conditions.push(format!(
-            "(project_id ILIKE ${0} OR project_name ILIKE ${0} OR description ILIKE ${0} OR vendor_name ILIKE ${0})",
+            "(project_id ILIKE ${0} OR project_name ILIKE ${0} OR description ILIKE ${0})",
             bind_index
         ));
         bind_index += 1;

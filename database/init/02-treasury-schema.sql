@@ -33,9 +33,9 @@ CREATE TABLE IF NOT EXISTS treasury.vendor_contracts (
     other_identifiers TEXT[],                    -- Related IDs from otherIdentifiers array
     project_name TEXT,                           -- Label from fund event
     description TEXT,                            -- Project description (joined if array)
-    vendor_name TEXT,                            -- vendor.name from metadata
+    vendor_name TEXT,                            -- DEPRECATED: always null, TOM spec has no vendor.name
     vendor_address TEXT,                         -- Payment destination (vendor.label in metadata)
-    contract_url TEXT,                           -- contract - link to agreement document
+    contract_url TEXT,                           -- DEPRECATED: always null, no on-chain data available
     contract_address TEXT,                       -- PSSC script address (from fund tx output)
     vendor_payment_key_hash VARCHAR(56),
     fund_tx_hash VARCHAR(64) NOT NULL,           -- Fund transaction
@@ -185,8 +185,7 @@ CREATE INDEX IF NOT EXISTS idx_vendor_fulltext ON treasury.vendor_contracts
     USING gin (to_tsvector('english',
         COALESCE(project_id, '') || ' ' ||
         COALESCE(project_name, '') || ' ' ||
-        COALESCE(description, '') || ' ' ||
-        COALESCE(vendor_name, '')
+        COALESCE(description, '')
     ));
 
 -- Events by milestone (for milestone event history)
@@ -232,9 +231,7 @@ SELECT
     vc.other_identifiers,
     vc.project_name,
     vc.description,
-    vc.vendor_name,
     vc.vendor_address,
-    vc.contract_url,
     vc.contract_address,
     vc.fund_tx_hash,
     vc.fund_slot,
@@ -245,7 +242,6 @@ SELECT
     vc.updated_at,
     -- Treasury context
     tc.contract_instance as treasury_instance,
-    tc.name as treasury_name,
     -- Milestone counts (excluding archived)
     COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived) as total_milestones,
     COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived AND NOT m.evidence_provided AND NOT m.withdrawn) as pending_milestones,
@@ -254,9 +250,9 @@ SELECT
     COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived AND m.paused AND NOT m.withdrawn) as paused_milestones,
     -- Financial totals from milestones
     COALESCE(SUM(DISTINCT m.withdraw_amount) FILTER (WHERE NOT m.archived), 0)::BIGINT as total_withdrawn_lovelace,
-    -- Current balance from UTXOs
-    COALESCE(SUM(u.lovelace_amount) FILTER (WHERE NOT u.spent), 0)::BIGINT as current_balance_lovelace,
-    COUNT(u.id) FILTER (WHERE NOT u.spent) as utxo_count,
+    -- Current balance from UTXOs (only script address UTXOs)
+    COALESCE(SUM(u.lovelace_amount) FILTER (WHERE NOT u.spent AND u.address LIKE 'addr1x%'), 0)::BIGINT as current_balance_lovelace,
+    COUNT(u.id) FILTER (WHERE NOT u.spent AND u.address LIKE 'addr1x%') as utxo_count,
     -- Last event time
     (SELECT MAX(e.block_time) FROM treasury.events e WHERE e.vendor_contract_id = vc.id) as last_event_time,
     -- Event count
@@ -265,7 +261,7 @@ FROM treasury.vendor_contracts vc
 LEFT JOIN treasury.treasury_contracts tc ON tc.id = vc.treasury_id
 LEFT JOIN treasury.milestones m ON m.vendor_contract_id = vc.id
 LEFT JOIN treasury.utxos u ON u.vendor_contract_id = vc.id
-GROUP BY vc.id, tc.contract_instance, tc.name;
+GROUP BY vc.id, tc.contract_instance;
 
 -- Milestone timeline with vendor context
 CREATE OR REPLACE VIEW treasury.v_milestone_timeline AS
@@ -330,7 +326,6 @@ SELECT
     tc.contract_instance,
     tc.contract_address,
     tc.stake_credential,
-    tc.name,
     tc.status,
     tc.publish_tx_hash,
     tc.publish_time,
@@ -341,15 +336,22 @@ SELECT
     COUNT(DISTINCT vc.id) FILTER (WHERE vc.status = 'active') as active_contracts,
     COUNT(DISTINCT vc.id) FILTER (WHERE vc.status = 'completed') as completed_contracts,
     COUNT(DISTINCT vc.id) FILTER (WHERE vc.status = 'cancelled') as cancelled_contracts,
-    COALESCE(SUM(u.lovelace_amount) FILTER (WHERE NOT u.spent AND u.address = tc.contract_address), 0)::BIGINT as treasury_balance,
-    COUNT(u.id) FILTER (WHERE NOT u.spent AND u.address = tc.contract_address) as utxo_count,
+    COALESCE((
+        SELECT SUM(au.lovelace_amount)
+        FROM yaci_store.address_utxo au
+        WHERE au.owner_addr = tc.contract_address
+    ), 0)::BIGINT as treasury_balance,
+    COALESCE((
+        SELECT COUNT(*)
+        FROM yaci_store.address_utxo au
+        WHERE au.owner_addr = tc.contract_address
+    ), 0) as utxo_count,
     (SELECT COUNT(*) FROM treasury.events WHERE treasury_id = tc.id) as total_events,
     (SELECT MAX(block_time) FROM treasury.events WHERE treasury_id = tc.id) as last_event_time,
     tc.created_at,
     tc.updated_at
 FROM treasury.treasury_contracts tc
 LEFT JOIN treasury.vendor_contracts vc ON vc.treasury_id = tc.id
-LEFT JOIN treasury.utxos u ON u.address = tc.contract_address
 GROUP BY tc.id;
 
 -- Events with full context (treasury, project, milestone info)
@@ -368,11 +370,9 @@ SELECT
     e.created_at,
     -- Treasury context
     tc.contract_instance as treasury_instance,
-    tc.name as treasury_name,
     -- Project context
     vc.project_id,
     vc.project_name,
-    vc.vendor_name,
     vc.contract_address as project_address,
     -- Milestone context
     m.milestone_id,
@@ -388,21 +388,24 @@ CREATE OR REPLACE VIEW treasury.v_financial_summary AS
 SELECT
     tc.id as treasury_id,
     tc.contract_instance,
-    tc.name as treasury_name,
     -- Allocation totals
     COALESCE(SUM(vc.initial_amount_lovelace), 0)::BIGINT as total_allocated_lovelace,
     -- Withdrawal totals
     COALESCE(SUM(m_totals.total_withdrawn), 0)::BIGINT as total_withdrawn_lovelace,
     -- Remaining (allocated - withdrawn)
     (COALESCE(SUM(vc.initial_amount_lovelace), 0) - COALESCE(SUM(m_totals.total_withdrawn), 0))::BIGINT as total_remaining_lovelace,
-    -- Treasury balance (actual UTXOs)
-    COALESCE(SUM(u.lovelace_amount) FILTER (WHERE NOT u.spent AND u.address = tc.contract_address), 0)::BIGINT as treasury_balance_lovelace,
+    -- Treasury balance (actual UTXOs from yaci_store)
+    COALESCE((
+        SELECT SUM(au.lovelace_amount)
+        FROM yaci_store.address_utxo au
+        WHERE au.owner_addr = tc.contract_address
+    ), 0)::BIGINT as treasury_balance_lovelace,
     -- Project-level balance (sum of project UTXOs)
     COALESCE((
         SELECT SUM(u2.lovelace_amount)
         FROM treasury.utxos u2
         JOIN treasury.vendor_contracts vc2 ON vc2.id = u2.vendor_contract_id
-        WHERE vc2.treasury_id = tc.id AND NOT u2.spent
+        WHERE vc2.treasury_id = tc.id AND NOT u2.spent AND u2.address LIKE 'addr1x%'
     ), 0)::BIGINT as project_balance_lovelace,
     -- Counts
     COUNT(DISTINCT vc.id) as project_count,
@@ -417,5 +420,4 @@ LEFT JOIN (
     WHERE NOT m.archived
     GROUP BY m.vendor_contract_id
 ) m_totals ON m_totals.vendor_contract_id = vc.id
-LEFT JOIN treasury.utxos u ON u.address = tc.contract_address
 GROUP BY tc.id;

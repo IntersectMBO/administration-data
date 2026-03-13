@@ -111,24 +111,21 @@ impl EventProcessor {
     /// Process a publish event - create treasury contract
     async fn process_publish(&self, event: &RawTomEvent, body: &Value, instance: &str) -> anyhow::Result<()> {
         let event_body = body.get("body").unwrap_or(body);
-        let name = extract_text(event_body, "label");
         let permissions = event_body.get("permissions").cloned();
 
         // Upsert treasury contract
         let treasury_id: i32 = sqlx::query_scalar(
             r#"
-            INSERT INTO treasury.treasury_contracts (contract_instance, name, publish_tx_hash, publish_time, permissions)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO treasury.treasury_contracts (contract_instance, publish_tx_hash, publish_time, permissions)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (contract_instance) DO UPDATE
-                SET name = COALESCE(EXCLUDED.name, treasury.treasury_contracts.name),
-                    publish_tx_hash = COALESCE(treasury.treasury_contracts.publish_tx_hash, EXCLUDED.publish_tx_hash),
+                SET publish_tx_hash = COALESCE(treasury.treasury_contracts.publish_tx_hash, EXCLUDED.publish_tx_hash),
                     publish_time = COALESCE(treasury.treasury_contracts.publish_time, EXCLUDED.publish_time),
                     permissions = COALESCE(EXCLUDED.permissions, treasury.treasury_contracts.permissions)
             RETURNING id
             "#
         )
         .bind(instance)
-        .bind(&name)
         .bind(&event.tx_hash)
         .bind(event.block_time)
         .bind(&permissions)
@@ -160,6 +157,24 @@ impl EventProcessor {
         .fetch_one(&self.pool)
         .await?;
 
+        // Extract treasury contract address from tx outputs
+        let contract_address: Option<String> = sqlx::query_scalar(
+            "SELECT owner_addr FROM yaci_store.address_utxo WHERE tx_hash = $1 AND owner_addr LIKE 'addr1x%' LIMIT 1"
+        )
+        .bind(&event.tx_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(ref addr) = contract_address {
+            let stake_cred = crate::parsers::address::extract_stake_credential(addr);
+            sqlx::query("UPDATE treasury.treasury_contracts SET contract_address = COALESCE(contract_address, $1), stake_credential = COALESCE(stake_credential, $2) WHERE id = $3")
+                .bind(addr)
+                .bind(&stake_cred)
+                .bind(treasury_id)
+                .execute(&self.pool)
+                .await?;
+        }
+
         let event_body = body.get("body").unwrap_or(body);
         let reason = extract_text(event_body, "reason");
 
@@ -187,11 +202,8 @@ impl EventProcessor {
 
         let project_name = extract_text(event_body, "label");
         let description = extract_text(event_body, "description");
-        // TOM spec has no vendor.name field — vendor_name is not available in metadata
-        let vendor_name: Option<String> = None;
         let vendor_address = event_body.get("vendor")
             .and_then(|v| extract_text_from_value(v.get("label")));
-        let contract_url = extract_contract(event_body);
         let mut other_identifiers: Vec<String> = event_body.get("otherIdentifiers")
             .and_then(|o| o.as_array())
             .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect::<Vec<_>>())
@@ -232,15 +244,45 @@ impl EventProcessor {
             None
         };
 
+        // Fallback: populate treasury contract_address if still null
+        // The treasury address is the addr1x input that differs from the vendor contract output
+        if let Some(tid) = treasury_id {
+            if let Some(ref vc_addr) = contract_address {
+                let treasury_addr: Option<String> = sqlx::query_scalar(
+                    r#"
+                    SELECT DISTINCT au.owner_addr
+                    FROM yaci_store.tx_input ti
+                    JOIN yaci_store.address_utxo au ON au.tx_hash = ti.tx_hash AND au.output_index = ti.output_index
+                    WHERE ti.spent_tx_hash = $1 AND au.owner_addr LIKE 'addr1x%' AND au.owner_addr != $2
+                    LIMIT 1
+                    "#
+                )
+                .bind(&event.tx_hash)
+                .bind(vc_addr)
+                .fetch_optional(&self.pool)
+                .await?;
+
+                if let Some(ref addr) = treasury_addr {
+                    let stake_cred = crate::parsers::address::extract_stake_credential(addr);
+                    sqlx::query("UPDATE treasury.treasury_contracts SET contract_address = COALESCE(contract_address, $1), stake_credential = COALESCE(stake_credential, $2) WHERE id = $3")
+                        .bind(addr)
+                        .bind(&stake_cred)
+                        .bind(tid)
+                        .execute(&self.pool)
+                        .await?;
+                }
+            }
+        }
+
         // Insert vendor contract
         let vendor_contract_id: i32 = sqlx::query_scalar(
             r#"
             INSERT INTO treasury.vendor_contracts (
                 treasury_id, project_id, other_identifiers, project_name, description,
-                vendor_name, vendor_address, contract_url, contract_address,
+                vendor_address, contract_address,
                 fund_tx_hash, fund_slot, fund_block_time, initial_amount_lovelace, status
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'active')
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'active')
             ON CONFLICT (project_id) DO UPDATE
                 SET project_name = COALESCE(EXCLUDED.project_name, treasury.vendor_contracts.project_name),
                     description = COALESCE(EXCLUDED.description, treasury.vendor_contracts.description)
@@ -252,9 +294,7 @@ impl EventProcessor {
         .bind(&other_identifiers)
         .bind(&project_name)
         .bind(&description)
-        .bind(&vendor_name)
         .bind(&vendor_address)
-        .bind(&contract_url)
         .bind(&contract_address)
         .bind(&event.tx_hash)
         .bind(event.slot)
@@ -344,9 +384,13 @@ impl EventProcessor {
                         Some((addr, amt)) => (Some(addr), amt),
                         None => (None, None),
                     };
-                    let address_type = address.as_ref().map(|a| {
-                        if a.starts_with("addr1x") { "vendor_contract" } else { "vendor" }
-                    });
+
+                    // Only track UTXOs at script addresses (addr1x) — skip change outputs
+                    if !address.as_ref().map_or(false, |a| a.starts_with("addr1x")) {
+                        continue;
+                    }
+
+                    let address_type = Some("vendor_contract");
 
                     // Record this UTXO with the vendor_contract_id for future event lookups
                     sqlx::query(
@@ -746,22 +790,19 @@ impl EventProcessor {
             let description = extract_text(event_body, "description");
             let vendor_address = event_body.get("vendor")
                 .and_then(|v| extract_text_from_value(v.get("label")));
-            let contract_url = extract_contract(event_body);
 
             sqlx::query(
                 r#"
                 UPDATE treasury.vendor_contracts
                 SET project_name = COALESCE($1, project_name),
                     description = COALESCE($2, description),
-                    vendor_address = COALESCE($3, vendor_address),
-                    contract_url = COALESCE($4, contract_url)
-                WHERE id = $5
+                    vendor_address = COALESCE($3, vendor_address)
+                WHERE id = $4
                 "#
             )
             .bind(&project_name)
             .bind(&description)
             .bind(&vendor_address)
-            .bind(&contract_url)
             .bind(vc_id)
             .execute(&self.pool)
             .await?;
@@ -1040,9 +1081,13 @@ impl EventProcessor {
                                 Some((addr, amt, datum)) => (Some(addr), amt, datum),
                                 None => (None, None, None),
                             };
-                            let address_type = address.as_ref().map(|a| {
-                                if a.starts_with("addr1x") { "vendor_contract" } else { "vendor" }
-                            });
+
+                            // Only track UTXOs at script addresses (addr1x) — skip change outputs
+                            if !address.as_ref().map_or(false, |a| a.starts_with("addr1x")) {
+                                continue;
+                            }
+
+                            let address_type = Some("vendor_contract");
 
                             sqlx::query(
                                 r#"
@@ -1133,17 +1178,6 @@ impl EventProcessor {
         }
 
         Ok(())
-    }
-}
-
-/// Extract contract URL from a field that might be a string or an object with anchorUrl
-fn extract_contract(event_body: &Value) -> Option<String> {
-    match event_body.get("contract") {
-        Some(Value::String(s)) => Some(s.clone()),
-        Some(Value::Object(obj)) => obj.get("anchorUrl")
-            .and_then(|u| u.as_str())
-            .map(String::from),
-        _ => None,
     }
 }
 

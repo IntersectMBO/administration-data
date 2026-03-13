@@ -143,7 +143,7 @@ Vendor contracts with milestone counts, financials, and UTXO balance.
 SELECT * FROM treasury.v_vendor_contracts_summary;
 ```
 
-Fields: id, treasury_id, project_id, other_identifiers, project_name, description, vendor_name, vendor_address, contract_url, contract_address, fund_tx_hash, fund_slot, fund_block_time, initial_amount_lovelace, status, created_at, updated_at, treasury_instance, treasury_name, total_milestones, pending_milestones, completed_milestones, withdrawn_milestones, total_withdrawn_lovelace, current_balance_lovelace, utxo_count, last_event_time, event_count
+Fields: id, treasury_id, project_id, other_identifiers, project_name, description, vendor_name, vendor_address, contract_url, contract_address, fund_tx_hash, fund_slot, fund_block_time, initial_amount_lovelace, status, created_at, updated_at, treasury_instance, total_milestones, pending_milestones, completed_milestones, withdrawn_milestones, total_withdrawn_lovelace, current_balance_lovelace, utxo_count, last_event_time, event_count
 
 ### treasury.v_events_with_context
 Events with full treasury/project/milestone context.
@@ -152,7 +152,7 @@ Events with full treasury/project/milestone context.
 SELECT * FROM treasury.v_events_with_context ORDER BY block_time DESC;
 ```
 
-Fields: id, tx_hash, slot, block_number, block_time, event_type, amount_lovelace, reason, destination, metadata, created_at, treasury_instance, treasury_name, project_id, project_name, vendor_name, project_address, milestone_id, milestone_label, milestone_order
+Fields: id, tx_hash, slot, block_number, block_time, event_type, amount_lovelace, reason, destination, metadata, created_at, treasury_instance, project_id, project_name, vendor_name, project_address, milestone_id, milestone_label, milestone_order
 
 ### treasury.v_financial_summary
 Financial summary showing allocated vs withdrawn vs remaining.
@@ -161,7 +161,7 @@ Financial summary showing allocated vs withdrawn vs remaining.
 SELECT * FROM treasury.v_financial_summary;
 ```
 
-Fields: treasury_id, contract_instance, treasury_name, total_allocated_lovelace, total_withdrawn_lovelace, total_remaining_lovelace, treasury_balance_lovelace, project_balance_lovelace, project_count, active_project_count
+Fields: treasury_id, contract_instance, total_allocated_lovelace, total_withdrawn_lovelace, total_remaining_lovelace, treasury_balance_lovelace, project_balance_lovelace, project_count, active_project_count
 
 ### treasury.v_milestone_timeline
 Milestones with vendor contract context.

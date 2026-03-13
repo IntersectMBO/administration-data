@@ -132,8 +132,6 @@ pub struct TreasuryResponse {
     pub contract_address: Option<String>,
     /// Stake credential
     pub stake_credential: Option<String>,
-    /// Human-readable name
-    pub name: Option<String>,
     /// Contract status (active/paused)
     pub status: Option<String>,
     /// Publish transaction hash
@@ -189,7 +187,6 @@ pub struct TreasurySummaryRow {
     pub contract_instance: String,
     pub contract_address: Option<String>,
     pub stake_credential: Option<String>,
-    pub name: Option<String>,
     pub status: Option<String>,
     pub publish_tx_hash: Option<String>,
     pub publish_time: Option<i64>,
@@ -216,7 +213,6 @@ impl From<TreasurySummaryRow> for TreasuryResponse {
             contract_instance: row.contract_instance,
             contract_address: row.contract_address,
             stake_credential: row.stake_credential,
-            name: row.name,
             status: row.status,
             publish_tx_hash: row.publish_tx_hash,
             publish_time: row.publish_time,
@@ -256,12 +252,8 @@ pub struct VendorContractSummary {
     pub project_name: Option<String>,
     /// Project description
     pub description: Option<String>,
-    /// Vendor name
-    pub vendor_name: Option<String>,
     /// Vendor payment address
     pub vendor_address: Option<String>,
-    /// Contract URL (link to agreement)
-    pub contract_url: Option<String>,
     /// PSSC script address
     pub contract_address: Option<String>,
     /// Contract status (active/paused/completed/cancelled)
@@ -297,14 +289,10 @@ pub struct VendorContractDetail {
     pub project_name: Option<String>,
     /// Project description
     pub description: Option<String>,
-    /// Vendor name
-    pub vendor_name: Option<String>,
     /// Vendor payment address
     pub vendor_address: Option<String>,
     /// Vendor payment key hash from datum
     pub vendor_payment_key_hash: Option<String>,
-    /// Contract URL (link to agreement)
-    pub contract_url: Option<String>,
     /// PSSC script address
     pub contract_address: Option<String>,
     /// Contract status (active/paused/completed/cancelled)
@@ -366,8 +354,6 @@ pub struct VendorFinancials {
 pub struct TreasuryReference {
     /// Contract instance identifier
     pub contract_instance: Option<String>,
-    /// Treasury name
-    pub name: Option<String>,
 }
 
 /// Database row for vendor contract summary
@@ -380,9 +366,7 @@ pub struct VendorContractSummaryRow {
     pub other_identifiers: Option<Vec<String>>,
     pub project_name: Option<String>,
     pub description: Option<String>,
-    pub vendor_name: Option<String>,
     pub vendor_address: Option<String>,
-    pub contract_url: Option<String>,
     pub contract_address: Option<String>,
     pub fund_tx_hash: String,
     pub fund_slot: Option<i64>,
@@ -392,7 +376,6 @@ pub struct VendorContractSummaryRow {
     pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
     pub treasury_instance: Option<String>,
-    pub treasury_name: Option<String>,
     pub total_milestones: Option<i64>,
     pub pending_milestones: Option<i64>,
     pub completed_milestones: Option<i64>,
@@ -421,9 +404,7 @@ impl From<VendorContractSummaryRow> for VendorContractSummary {
             project_id: row.project_id,
             project_name: row.project_name,
             description: row.description,
-            vendor_name: row.vendor_name,
             vendor_address: row.vendor_address,
-            contract_url: row.contract_url,
             contract_address: row.contract_address,
             status: row.status,
             fund_tx_hash: row.fund_tx_hash,
@@ -445,7 +426,6 @@ impl From<VendorContractSummaryRow> for VendorContractSummary {
             },
             treasury: TreasuryReference {
                 contract_instance: row.treasury_instance,
-                name: row.treasury_name,
             },
             last_event_time: row.last_event_time,
             event_count: row.event_count,
@@ -470,10 +450,8 @@ impl From<VendorContractSummaryRow> for VendorContractDetail {
             other_identifiers: row.other_identifiers,
             project_name: row.project_name,
             description: row.description,
-            vendor_name: row.vendor_name,
             vendor_address: row.vendor_address,
             vendor_payment_key_hash: None, // populated from DB when queried directly
-            contract_url: row.contract_url,
             contract_address: row.contract_address,
             status: row.status,
             fund_tx_hash: row.fund_tx_hash,
@@ -495,7 +473,6 @@ impl From<VendorContractSummaryRow> for VendorContractDetail {
             },
             treasury: TreasuryReference {
                 contract_instance: row.treasury_instance,
-                name: row.treasury_name,
             },
             last_event_time: row.last_event_time,
             event_count: row.event_count,
@@ -712,8 +689,6 @@ pub struct EventResponse {
 pub struct EventTreasuryContext {
     /// Contract instance
     pub contract_instance: String,
-    /// Treasury name
-    pub name: Option<String>,
 }
 
 /// Project context for event
@@ -723,8 +698,6 @@ pub struct EventProjectContext {
     pub project_id: String,
     /// Project name
     pub project_name: Option<String>,
-    /// Vendor name
-    pub vendor_name: Option<String>,
     /// Contract address
     pub contract_address: Option<String>,
 }
@@ -755,10 +728,8 @@ pub struct EventWithContextRow {
     pub metadata: Option<serde_json::Value>,
     pub created_at: Option<DateTime<Utc>>,
     pub treasury_instance: Option<String>,
-    pub treasury_name: Option<String>,
     pub project_id: Option<String>,
     pub project_name: Option<String>,
-    pub vendor_name: Option<String>,
     pub project_address: Option<String>,
     pub milestone_id: Option<String>,
     pub milestone_label: Option<String>,
@@ -769,13 +740,11 @@ impl From<EventWithContextRow> for EventResponse {
     fn from(row: EventWithContextRow) -> Self {
         let treasury = row.treasury_instance.as_ref().map(|inst| EventTreasuryContext {
             contract_instance: inst.clone(),
-            name: row.treasury_name.clone(),
         });
 
         let project = row.project_id.as_ref().map(|pid| EventProjectContext {
             project_id: pid.clone(),
             project_name: row.project_name.clone(),
-            vendor_name: row.vendor_name.clone(),
             contract_address: row.project_address.clone(),
         });
 
