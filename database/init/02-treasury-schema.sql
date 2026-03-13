@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS treasury.vendor_contracts (
     vendor_address TEXT,                         -- Payment destination (vendor.label in metadata)
     contract_url TEXT,                           -- contract - link to agreement document
     contract_address TEXT,                       -- PSSC script address (from fund tx output)
+    vendor_payment_key_hash VARCHAR(56),
     fund_tx_hash VARCHAR(64) NOT NULL,           -- Fund transaction
     fund_slot BIGINT,                            -- Blockchain slot
     fund_block_time BIGINT,                      -- Block timestamp
@@ -55,18 +56,35 @@ CREATE TABLE IF NOT EXISTS treasury.milestones (
     label TEXT,                                  -- Milestone name
     description TEXT,                            -- Detailed description
     acceptance_criteria TEXT,                    -- Completion criteria
-    amount_lovelace BIGINT,                      -- Allocated amount (if specified)
-    status TEXT DEFAULT 'pending',               -- pending/completed/disbursed
+
+    -- From inline UTXO datum
+    amount_lovelace BIGINT,                      -- Lovelace amount from datum Value map
+    time_limit BIGINT,                           -- POSIXTime in milliseconds
+
+    -- Independent boolean lifecycle flags
+    withdrawn BOOLEAN NOT NULL DEFAULT FALSE,
+    evidence_provided BOOLEAN NOT NULL DEFAULT FALSE,
+    archived BOOLEAN NOT NULL DEFAULT FALSE,
+    paused BOOLEAN NOT NULL DEFAULT FALSE,
+
+    -- Withdraw details (set when withdrawn = true)
+    withdraw_tx_hash VARCHAR(64),
+    withdraw_time BIGINT,
+    withdraw_amount BIGINT,
+
+    -- Evidence/completion details (set when evidence_provided = true)
     complete_tx_hash VARCHAR(64),                -- Completion transaction
     complete_time BIGINT,                        -- Completion timestamp
     complete_description TEXT,                   -- Description from complete event
     evidence JSONB,                              -- Evidence array from complete event
-    disburse_tx_hash VARCHAR(64),                -- Disbursement transaction
-    disburse_time BIGINT,                        -- Disbursement timestamp
-    disburse_amount BIGINT,                      -- Actual disbursed amount
+
+    -- Archive details (set when archived = true)
+    archived_by_tx_hash VARCHAR(64),
+    archived_at BIGINT,
+    superseded_by INT REFERENCES treasury.milestones(id),
+
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(vendor_contract_id, milestone_id)
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- Events - Audit log of all TOM events
@@ -100,6 +118,7 @@ CREATE TABLE IF NOT EXISTS treasury.utxos (
     block_number BIGINT,                         -- Block number
     spent BOOLEAN DEFAULT FALSE,                 -- Is spent?
     spent_tx_hash VARCHAR(64),                   -- Spending transaction
+    inline_datum_cbor TEXT,
     spent_slot BIGINT,                           -- When spent
     UNIQUE(tx_hash, output_index)
 );
@@ -133,13 +152,19 @@ CREATE INDEX IF NOT EXISTS idx_vendor_project_id ON treasury.vendor_contracts(pr
 CREATE INDEX IF NOT EXISTS idx_vendor_status ON treasury.vendor_contracts(status);
 CREATE INDEX IF NOT EXISTS idx_vendor_fund_time ON treasury.vendor_contracts(fund_block_time DESC);
 CREATE INDEX IF NOT EXISTS idx_vendor_contract_address ON treasury.vendor_contracts(contract_address);
+CREATE INDEX IF NOT EXISTS idx_vendor_payment_key_hash ON treasury.vendor_contracts(vendor_payment_key_hash);
 CREATE INDEX IF NOT EXISTS idx_vendor_search ON treasury.vendor_contracts
     USING gin (to_tsvector('english', COALESCE(project_name, '') || ' ' || COALESCE(description, '')));
 
 -- Milestones
 CREATE INDEX IF NOT EXISTS idx_milestone_vendor ON treasury.milestones(vendor_contract_id);
-CREATE INDEX IF NOT EXISTS idx_milestone_status ON treasury.milestones(status);
 CREATE INDEX IF NOT EXISTS idx_milestone_order ON treasury.milestones(vendor_contract_id, milestone_order);
+-- Only one active (non-archived) milestone per vendor contract + milestone_id
+CREATE UNIQUE INDEX IF NOT EXISTS idx_milestone_active_unique
+    ON treasury.milestones(vendor_contract_id, milestone_id)
+    WHERE NOT archived;
+CREATE INDEX IF NOT EXISTS idx_milestone_not_archived
+    ON treasury.milestones(vendor_contract_id) WHERE NOT archived;
 
 -- Events
 CREATE INDEX IF NOT EXISTS idx_event_type ON treasury.events(event_type);
@@ -221,13 +246,14 @@ SELECT
     -- Treasury context
     tc.contract_instance as treasury_instance,
     tc.name as treasury_name,
-    -- Milestone counts
-    COUNT(DISTINCT m.id) as total_milestones,
-    COUNT(DISTINCT m.id) FILTER (WHERE m.status = 'pending') as pending_milestones,
-    COUNT(DISTINCT m.id) FILTER (WHERE m.status = 'completed') as completed_milestones,
-    COUNT(DISTINCT m.id) FILTER (WHERE m.status = 'disbursed') as disbursed_milestones,
+    -- Milestone counts (excluding archived)
+    COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived) as total_milestones,
+    COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived AND NOT m.evidence_provided AND NOT m.withdrawn) as pending_milestones,
+    COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived AND m.evidence_provided AND NOT m.withdrawn) as completed_milestones,
+    COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived AND m.withdrawn) as withdrawn_milestones,
+    COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived AND m.paused AND NOT m.withdrawn) as paused_milestones,
     -- Financial totals from milestones
-    COALESCE(SUM(DISTINCT m.disburse_amount), 0)::BIGINT as total_disbursed_lovelace,
+    COALESCE(SUM(DISTINCT m.withdraw_amount) FILTER (WHERE NOT m.archived), 0)::BIGINT as total_withdrawn_lovelace,
     -- Current balance from UTXOs
     COALESCE(SUM(u.lovelace_amount) FILTER (WHERE NOT u.spent), 0)::BIGINT as current_balance_lovelace,
     COUNT(u.id) FILTER (WHERE NOT u.spent) as utxo_count,
@@ -251,14 +277,20 @@ SELECT
     m.description,
     m.acceptance_criteria,
     m.amount_lovelace,
-    m.status,
+    m.time_limit,
+    m.withdrawn,
+    m.evidence_provided,
+    m.archived,
     m.complete_tx_hash,
     m.complete_time,
     m.complete_description,
     m.evidence,
-    m.disburse_tx_hash,
-    m.disburse_time,
-    m.disburse_amount,
+    m.withdraw_tx_hash,
+    m.withdraw_time,
+    m.withdraw_amount,
+    m.archived_by_tx_hash,
+    m.archived_at,
+    m.superseded_by,
     vc.project_id,
     vc.project_name,
     vc.vendor_address
@@ -286,8 +318,8 @@ SELECT
     m.label as milestone_label,
     m.milestone_order
 FROM treasury.events e
-LEFT JOIN treasury.treasury_contracts tc ON tc.id = e.treasury_id
 LEFT JOIN treasury.vendor_contracts vc ON vc.id = e.vendor_contract_id
+LEFT JOIN treasury.treasury_contracts tc ON tc.id = COALESCE(e.treasury_id, vc.treasury_id)
 LEFT JOIN treasury.milestones m ON m.id = e.milestone_id
 ORDER BY e.slot DESC;
 
@@ -347,8 +379,8 @@ SELECT
     m.label as milestone_label,
     m.milestone_order
 FROM treasury.events e
-LEFT JOIN treasury.treasury_contracts tc ON tc.id = e.treasury_id
 LEFT JOIN treasury.vendor_contracts vc ON vc.id = e.vendor_contract_id
+LEFT JOIN treasury.treasury_contracts tc ON tc.id = COALESCE(e.treasury_id, vc.treasury_id)
 LEFT JOIN treasury.milestones m ON m.id = e.milestone_id;
 
 -- Financial summary view (allocated vs disbursed vs remaining)
@@ -359,10 +391,10 @@ SELECT
     tc.name as treasury_name,
     -- Allocation totals
     COALESCE(SUM(vc.initial_amount_lovelace), 0)::BIGINT as total_allocated_lovelace,
-    -- Disbursement totals
-    COALESCE(SUM(m_totals.total_disbursed), 0)::BIGINT as total_disbursed_lovelace,
-    -- Remaining (allocated - disbursed)
-    (COALESCE(SUM(vc.initial_amount_lovelace), 0) - COALESCE(SUM(m_totals.total_disbursed), 0))::BIGINT as total_remaining_lovelace,
+    -- Withdrawal totals
+    COALESCE(SUM(m_totals.total_withdrawn), 0)::BIGINT as total_withdrawn_lovelace,
+    -- Remaining (allocated - withdrawn)
+    (COALESCE(SUM(vc.initial_amount_lovelace), 0) - COALESCE(SUM(m_totals.total_withdrawn), 0))::BIGINT as total_remaining_lovelace,
     -- Treasury balance (actual UTXOs)
     COALESCE(SUM(u.lovelace_amount) FILTER (WHERE NOT u.spent AND u.address = tc.contract_address), 0)::BIGINT as treasury_balance_lovelace,
     -- Project-level balance (sum of project UTXOs)
@@ -380,8 +412,9 @@ LEFT JOIN treasury.vendor_contracts vc ON vc.treasury_id = tc.id
 LEFT JOIN (
     SELECT
         m.vendor_contract_id,
-        SUM(COALESCE(m.disburse_amount, 0)) as total_disbursed
+        SUM(COALESCE(m.withdraw_amount, 0)) as total_withdrawn
     FROM treasury.milestones m
+    WHERE NOT m.archived
     GROUP BY m.vendor_contract_id
 ) m_totals ON m_totals.vendor_contract_id = vc.id
 LEFT JOIN treasury.utxos u ON u.address = tc.contract_address

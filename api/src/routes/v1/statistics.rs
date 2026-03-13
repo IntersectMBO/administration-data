@@ -5,7 +5,7 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 
 use crate::models::v1::{
-    lovelace_to_ada, ApiResponse, EventStats, FinancialStats, MilestoneStats, ProjectStats,
+    ApiResponse, EventStats, FinancialStats, MilestoneStats, ProjectStats,
     StatisticsResponse, SyncStats, TreasuryStats,
 };
 
@@ -140,8 +140,8 @@ async fn get_milestone_stats(pool: &PgPool) -> Result<MilestoneStats, StatusCode
 }
 
 async fn get_event_stats(pool: &PgPool) -> Result<EventStats, StatusCode> {
-    // Get total count
-    let (total_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM treasury.events")
+    // Get processed event count
+    let (processed_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM treasury.events")
         .fetch_one(pool)
         .await
         .map_err(|e| {
@@ -149,11 +149,14 @@ async fn get_event_stats(pool: &PgPool) -> Result<EventStats, StatusCode> {
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Get counts by type
-    let type_rows = sqlx::query_as::<_, (String, i64)>(
+    // Get on-chain TOM event count and breakdown by type from yaci_store
+    let on_chain_rows = sqlx::query_as::<_, (String, i64)>(
         r#"
-        SELECT event_type, COUNT(*)
-        FROM treasury.events
+        SELECT
+            COALESCE(body::jsonb->>'type', 'unknown') as event_type,
+            COUNT(*)
+        FROM yaci_store.transaction_metadata
+        WHERE label = '1694'
         GROUP BY event_type
         ORDER BY COUNT(*) DESC
         "#
@@ -165,10 +168,12 @@ async fn get_event_stats(pool: &PgPool) -> Result<EventStats, StatusCode> {
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let by_type: HashMap<String, i64> = type_rows.into_iter().collect();
+    let on_chain_count: i64 = on_chain_rows.iter().map(|(_, c)| c).sum();
+    let by_type: HashMap<String, i64> = on_chain_rows.into_iter().collect();
 
     Ok(EventStats {
-        total_count,
+        on_chain_count,
+        processed_count,
         by_type,
     })
 }
@@ -213,11 +218,8 @@ async fn get_financial_stats(pool: &PgPool) -> Result<FinancialStats, StatusCode
 
     Ok(FinancialStats {
         total_allocated_lovelace: allocated,
-        total_allocated_ada: lovelace_to_ada(allocated),
         total_withdrawn_lovelace: withdrawn,
-        total_withdrawn_ada: lovelace_to_ada(withdrawn),
         current_balance_lovelace: balance,
-        current_balance_ada: lovelace_to_ada(balance),
     })
 }
 

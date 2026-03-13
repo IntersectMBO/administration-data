@@ -240,6 +240,7 @@ pub async fn get_vendor_contract_milestones(
             m.time_limit,
             m.withdrawn,
             m.evidence_provided,
+            m.paused,
             m.archived,
             m.complete_tx_hash,
             m.complete_time,

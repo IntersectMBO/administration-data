@@ -19,6 +19,7 @@ fn env_u16(key: &str, default: u16) -> u16 {
 
 mod models;
 mod openapi;
+mod parsers;
 mod routes;
 mod services;
 

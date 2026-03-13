@@ -31,18 +31,31 @@ Cardano Node → YACI Store indexer → PostgreSQL (yaci_store schema)
 This project implements the **Treasury Oversight Metadata (TOM)** standard, using CIP-100 metadata label **1694**.
 
 ### Contract Hierarchy
-- **Treasury Contract (TRSC)** → contains multiple **Vendor Contracts (PSSC)** → each has **Milestones**
+- **Treasury Contract (TRSC)** → at a unique script address, holds treasury reserve funds
+- **Vendor Contract (PSSC)** → **ONE shared script address for ALL projects** (not one per project)
+  - Each `fund` tx creates UTXOs at the shared PSSC address
+  - UTXOs belong to specific projects, distinguished by inline datum, NOT by address
+  - UTXO chain tracking (`find_vendor_contract_from_inputs`) links events to projects by tracing spent inputs
+- **Milestones** → belong to a vendor contract/project
+
+### Vendor Naming
+- `vendor.name` does **not exist** in the TOM spec — code extracts it but always gets null
+- `vendor.label` in the spec is the vendor's display name; in practice, real metadata puts the payment address here
+- Vendor identity is typically embedded in the top-level `body.label` by convention (e.g., "Tastenkunst GmbH - Eternl Maintenance")
 
 ### Event Types
 publish, initialize, fund, complete, disburse, withdraw, pause, resume, modify, cancel, sweep, reorganize
+
+See [`docs/event-processing.md`](docs/event-processing.md) for detailed per-event field mappings, code extraction paths, DB writes, and known bugs.
 
 ### Financial Model
 - All amounts are in **lovelace** (1 ADA = 1,000,000 lovelace)
 
 ### Milestone Lifecycle
-Milestones use 3 independent boolean flags (not a linear status):
+Milestones use 4 independent boolean flags (not a linear status):
 - **evidence_provided** — vendor submitted completion evidence via a `complete` transaction
 - **withdrawn** — vendor withdrew payment via a `withdraw` transaction
+- **paused** — oversight committee paused this milestone (from inline datum constructor 0→1)
 - **archived** — milestone replaced by a `modify` event (old row preserved, new row created)
 
 Additionally, each milestone has a **time_limit** (POSIXTime ms) from the inline UTXO datum.
@@ -149,7 +162,7 @@ Never modify `yaci-store.jar` or YACI Store internals. Primary network: Mainnet 
 - **`.env` not committed**: copy `.env.example` and configure before first run.
 - **UTXO pruning**: YACI Store prunes spent UTXOs — historical UTXO data may not be available.
 - **Large JAR**: `indexer/yaci-store.jar` is ~108MB and committed to the repo. Don't regenerate unnecessarily.
-- **Inline datums**: `store.script.enabled` must be `true` in YACI Store config for milestone datum data (amounts, time limits). Currently disabled.
+- **Inline datums**: `store.script.enabled=true` in YACI Store config enables milestone datum data (amounts, time limits, pause flags). Requires full re-sync after enabling.
 - **Milestone archiving**: Filter `WHERE NOT archived` for current milestones. Archived rows are historical versions.
 
 ## Key File Locations

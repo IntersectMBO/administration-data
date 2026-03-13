@@ -40,3 +40,8 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # UUID
 uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Cardano datum parsing (CBOR/Plutus)
+pallas-primitives = "0.30"
+pallas-codec = "0.30"
+hex = "0.4"

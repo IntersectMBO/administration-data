@@ -43,12 +43,6 @@ pub async fn run_sync_loop(pool: PgPool) {
         tracing::error!("Initial sync failed: {}", e);
     }
 
-    // Sync UTXOs for tracked addresses
-    tracing::info!("Syncing UTXOs for tracked addresses...");
-    if let Err(e) = processor.sync_utxos().await {
-        tracing::error!("UTXO sync failed: {}", e);
-    }
-
     tracing::info!("Initial sync complete. Starting continuous sync loop.");
 
     // Continuous sync loop
@@ -83,7 +77,7 @@ async fn sync_new_events(pool: &PgPool, processor: &EventProcessor) -> anyhow::R
         FROM yaci_store.transaction_metadata m
         JOIN yaci_store.block b ON b.slot = m.slot
         WHERE m.label = '1694' AND m.slot > $1
-        ORDER BY m.slot ASC
+        ORDER BY m.slot ASC, m.tx_hash ASC
         LIMIT 1000
         "#
     )
@@ -125,9 +119,6 @@ async fn sync_new_events(pool: &PgPool, processor: &EventProcessor) -> anyhow::R
     .bind(&last_processed_tx)
     .execute(pool)
     .await?;
-
-    // Also sync any new UTXOs
-    processor.sync_utxos().await?;
 
     Ok(())
 }

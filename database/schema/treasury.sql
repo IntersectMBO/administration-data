@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS treasury.vendor_contracts (
     vendor_address TEXT,                         -- Payment destination (vendor.label in metadata)
     contract_url TEXT,                           -- contract - link to agreement document
     contract_address TEXT,                       -- PSSC script address (from fund tx output)
+    vendor_payment_key_hash VARCHAR(56),
     fund_tx_hash VARCHAR(64) NOT NULL,           -- Fund transaction
     fund_slot BIGINT,                            -- Blockchain slot
     fund_block_time BIGINT,                      -- Block timestamp
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS treasury.milestones (
     withdrawn BOOLEAN NOT NULL DEFAULT FALSE,
     evidence_provided BOOLEAN NOT NULL DEFAULT FALSE,
     archived BOOLEAN NOT NULL DEFAULT FALSE,
+    paused BOOLEAN NOT NULL DEFAULT FALSE,
 
     -- Withdraw details (set when withdrawn = true)
     withdraw_tx_hash VARCHAR(64),
@@ -116,6 +118,7 @@ CREATE TABLE IF NOT EXISTS treasury.utxos (
     block_number BIGINT,                         -- Block number
     spent BOOLEAN DEFAULT FALSE,                 -- Is spent?
     spent_tx_hash VARCHAR(64),                   -- Spending transaction
+    inline_datum_cbor TEXT,
     spent_slot BIGINT,                           -- When spent
     UNIQUE(tx_hash, output_index)
 );
@@ -149,6 +152,7 @@ CREATE INDEX IF NOT EXISTS idx_vendor_project_id ON treasury.vendor_contracts(pr
 CREATE INDEX IF NOT EXISTS idx_vendor_status ON treasury.vendor_contracts(status);
 CREATE INDEX IF NOT EXISTS idx_vendor_fund_time ON treasury.vendor_contracts(fund_block_time DESC);
 CREATE INDEX IF NOT EXISTS idx_vendor_contract_address ON treasury.vendor_contracts(contract_address);
+CREATE INDEX IF NOT EXISTS idx_vendor_payment_key_hash ON treasury.vendor_contracts(vendor_payment_key_hash);
 CREATE INDEX IF NOT EXISTS idx_vendor_search ON treasury.vendor_contracts
     USING gin (to_tsvector('english', COALESCE(project_name, '') || ' ' || COALESCE(description, '')));
 
@@ -247,6 +251,7 @@ SELECT
     COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived AND NOT m.evidence_provided AND NOT m.withdrawn) as pending_milestones,
     COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived AND m.evidence_provided AND NOT m.withdrawn) as completed_milestones,
     COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived AND m.withdrawn) as withdrawn_milestones,
+    COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived AND m.paused AND NOT m.withdrawn) as paused_milestones,
     -- Financial totals from milestones
     COALESCE(SUM(DISTINCT m.withdraw_amount) FILTER (WHERE NOT m.archived), 0)::BIGINT as total_withdrawn_lovelace,
     -- Current balance from UTXOs
@@ -313,8 +318,8 @@ SELECT
     m.label as milestone_label,
     m.milestone_order
 FROM treasury.events e
-LEFT JOIN treasury.treasury_contracts tc ON tc.id = e.treasury_id
 LEFT JOIN treasury.vendor_contracts vc ON vc.id = e.vendor_contract_id
+LEFT JOIN treasury.treasury_contracts tc ON tc.id = COALESCE(e.treasury_id, vc.treasury_id)
 LEFT JOIN treasury.milestones m ON m.id = e.milestone_id
 ORDER BY e.slot DESC;
 
@@ -374,8 +379,8 @@ SELECT
     m.label as milestone_label,
     m.milestone_order
 FROM treasury.events e
-LEFT JOIN treasury.treasury_contracts tc ON tc.id = e.treasury_id
 LEFT JOIN treasury.vendor_contracts vc ON vc.id = e.vendor_contract_id
+LEFT JOIN treasury.treasury_contracts tc ON tc.id = COALESCE(e.treasury_id, vc.treasury_id)
 LEFT JOIN treasury.milestones m ON m.id = e.milestone_id;
 
 -- Financial summary view (allocated vs disbursed vs remaining)

@@ -1,7 +1,7 @@
 //! V1 API Models with OpenAPI support
 //!
 //! These models follow the new API design with:
-//! - Both lovelace AND ADA amounts in responses
+//! - Amounts in lovelace (1 ADA = 1,000,000 lovelace)
 //! - Raw metadata AND parsed/normalized data
 //! - Consistent response envelopes with pagination
 
@@ -9,18 +9,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use utoipa::{IntoParams, ToSchema};
-
-// ============================================================================
-// CONSTANTS
-// ============================================================================
-
-/// Lovelace per ADA
-pub const LOVELACE_PER_ADA: f64 = 1_000_000.0;
-
-/// Convert lovelace to ADA
-pub fn lovelace_to_ada(lovelace: i64) -> f64 {
-    lovelace as f64 / LOVELACE_PER_ADA
-}
 
 // ============================================================================
 // RESPONSE ENVELOPE
@@ -192,8 +180,6 @@ pub struct TreasuryStatistics {
 pub struct TreasuryFinancials {
     /// Treasury balance in lovelace
     pub balance_lovelace: i64,
-    /// Treasury balance in ADA
-    pub balance_ada: f64,
 }
 
 /// Database row for treasury summary
@@ -248,7 +234,6 @@ impl From<TreasurySummaryRow> for TreasuryResponse {
             },
             financials: TreasuryFinancials {
                 balance_lovelace: balance,
-                balance_ada: lovelace_to_ada(balance),
             },
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -287,8 +272,6 @@ pub struct VendorContractSummary {
     pub fund_time: Option<i64>,
     /// Initial allocated amount in lovelace
     pub initial_amount_lovelace: Option<i64>,
-    /// Initial allocated amount in ADA
-    pub initial_amount_ada: Option<f64>,
     /// Milestone summary
     pub milestones_summary: MilestonesSummary,
     /// Financial summary
@@ -318,6 +301,8 @@ pub struct VendorContractDetail {
     pub vendor_name: Option<String>,
     /// Vendor payment address
     pub vendor_address: Option<String>,
+    /// Vendor payment key hash from datum
+    pub vendor_payment_key_hash: Option<String>,
     /// Contract URL (link to agreement)
     pub contract_url: Option<String>,
     /// PSSC script address
@@ -330,8 +315,6 @@ pub struct VendorContractDetail {
     pub fund_time: Option<i64>,
     /// Initial allocated amount in lovelace
     pub initial_amount_lovelace: Option<i64>,
-    /// Initial allocated amount in ADA
-    pub initial_amount_ada: Option<f64>,
     /// Milestone summary
     pub milestones_summary: MilestonesSummary,
     /// Financial summary
@@ -359,6 +342,8 @@ pub struct MilestonesSummary {
     pub completed: i64,
     /// Withdrawn milestones
     pub withdrawn: i64,
+    /// Paused milestones
+    pub paused: i64,
 }
 
 /// Vendor contract financial summary
@@ -366,16 +351,10 @@ pub struct MilestonesSummary {
 pub struct VendorFinancials {
     /// Total allocated amount in lovelace
     pub total_allocated_lovelace: i64,
-    /// Total allocated amount in ADA
-    pub total_allocated_ada: f64,
     /// Total withdrawn amount in lovelace
     pub total_withdrawn_lovelace: i64,
-    /// Total withdrawn amount in ADA
-    pub total_withdrawn_ada: f64,
     /// Current balance in lovelace (from UTXOs)
     pub current_balance_lovelace: i64,
-    /// Current balance in ADA
-    pub current_balance_ada: f64,
     /// Withdrawal percentage
     pub withdrawal_percentage: f64,
     /// UTXO count
@@ -418,6 +397,7 @@ pub struct VendorContractSummaryRow {
     pub pending_milestones: Option<i64>,
     pub completed_milestones: Option<i64>,
     pub withdrawn_milestones: Option<i64>,
+    pub paused_milestones: Option<i64>,
     pub total_withdrawn_lovelace: Option<i64>,
     pub current_balance_lovelace: Option<i64>,
     pub utxo_count: Option<i64>,
@@ -449,20 +429,17 @@ impl From<VendorContractSummaryRow> for VendorContractSummary {
             fund_tx_hash: row.fund_tx_hash,
             fund_time: row.fund_block_time,
             initial_amount_lovelace: row.initial_amount_lovelace,
-            initial_amount_ada: row.initial_amount_lovelace.map(lovelace_to_ada),
             milestones_summary: MilestonesSummary {
                 total: row.total_milestones.unwrap_or(0),
                 pending: row.pending_milestones.unwrap_or(0),
                 completed: row.completed_milestones.unwrap_or(0),
                 withdrawn: row.withdrawn_milestones.unwrap_or(0),
+                paused: row.paused_milestones.unwrap_or(0),
             },
             financials: VendorFinancials {
                 total_allocated_lovelace: initial_amount,
-                total_allocated_ada: lovelace_to_ada(initial_amount),
                 total_withdrawn_lovelace: total_withdrawn,
-                total_withdrawn_ada: lovelace_to_ada(total_withdrawn),
                 current_balance_lovelace: current_balance,
-                current_balance_ada: lovelace_to_ada(current_balance),
                 withdrawal_percentage: withdrawal_pct,
                 utxo_count: row.utxo_count.unwrap_or(0),
             },
@@ -495,26 +472,24 @@ impl From<VendorContractSummaryRow> for VendorContractDetail {
             description: row.description,
             vendor_name: row.vendor_name,
             vendor_address: row.vendor_address,
+            vendor_payment_key_hash: None, // populated from DB when queried directly
             contract_url: row.contract_url,
             contract_address: row.contract_address,
             status: row.status,
             fund_tx_hash: row.fund_tx_hash,
             fund_time: row.fund_block_time,
             initial_amount_lovelace: row.initial_amount_lovelace,
-            initial_amount_ada: row.initial_amount_lovelace.map(lovelace_to_ada),
             milestones_summary: MilestonesSummary {
                 total: row.total_milestones.unwrap_or(0),
                 pending: row.pending_milestones.unwrap_or(0),
                 completed: row.completed_milestones.unwrap_or(0),
                 withdrawn: row.withdrawn_milestones.unwrap_or(0),
+                paused: row.paused_milestones.unwrap_or(0),
             },
             financials: VendorFinancials {
                 total_allocated_lovelace: initial_amount,
-                total_allocated_ada: lovelace_to_ada(initial_amount),
                 total_withdrawn_lovelace: total_withdrawn,
-                total_withdrawn_ada: lovelace_to_ada(total_withdrawn),
                 current_balance_lovelace: current_balance,
-                current_balance_ada: lovelace_to_ada(current_balance),
                 withdrawal_percentage: withdrawal_pct,
                 utxo_count: row.utxo_count.unwrap_or(0),
             },
@@ -551,14 +526,14 @@ pub struct MilestoneResponse {
     pub acceptance_criteria: Option<String>,
     /// Allocated amount in lovelace
     pub amount_lovelace: Option<i64>,
-    /// Allocated amount in ADA
-    pub amount_ada: Option<f64>,
     /// Time limit (POSIXTime in milliseconds)
     pub time_limit: Option<i64>,
     /// Whether the vendor has withdrawn funds
     pub withdrawn: bool,
     /// Whether completion evidence has been provided
     pub evidence_provided: bool,
+    /// Whether this milestone is paused
+    pub paused: bool,
     /// Whether this milestone has been archived (replaced by a modify event)
     pub archived: bool,
     /// Completion details
@@ -593,8 +568,6 @@ pub struct MilestoneWithdrawal {
     pub time: Option<i64>,
     /// Withdrawn amount in lovelace
     pub amount_lovelace: Option<i64>,
-    /// Withdrawn amount in ADA
-    pub amount_ada: Option<f64>,
 }
 
 /// Milestone archive info (present when milestone has been superseded by a modify event)
@@ -632,6 +605,7 @@ pub struct MilestoneRow {
     pub time_limit: Option<i64>,
     pub withdrawn: bool,
     pub evidence_provided: bool,
+    pub paused: bool,
     pub archived: bool,
     pub complete_tx_hash: Option<String>,
     pub complete_time: Option<i64>,
@@ -660,7 +634,6 @@ impl From<MilestoneRow> for MilestoneResponse {
             tx_hash: tx.clone(),
             time: row.withdraw_time,
             amount_lovelace: row.withdraw_amount,
-            amount_ada: row.withdraw_amount.map(lovelace_to_ada),
         });
 
         let archive_info = if row.archived {
@@ -681,10 +654,10 @@ impl From<MilestoneRow> for MilestoneResponse {
             description: row.description,
             acceptance_criteria: row.acceptance_criteria,
             amount_lovelace: row.amount_lovelace,
-            amount_ada: row.amount_lovelace.map(lovelace_to_ada),
             time_limit: row.time_limit,
             withdrawn: row.withdrawn,
             evidence_provided: row.evidence_provided,
+            paused: row.paused,
             archived: row.archived,
             completion,
             withdrawal,
@@ -718,8 +691,6 @@ pub struct EventResponse {
     pub event_type: String,
     /// Amount in lovelace (if applicable)
     pub amount_lovelace: Option<i64>,
-    /// Amount in ADA (if applicable)
-    pub amount_ada: Option<f64>,
     /// Reason (for pause/cancel/modify events)
     pub reason: Option<String>,
     /// Destination (for disburse events)
@@ -822,7 +793,6 @@ impl From<EventWithContextRow> for EventResponse {
             block_time: row.block_time,
             event_type: row.event_type,
             amount_lovelace: row.amount_lovelace,
-            amount_ada: row.amount_lovelace.map(lovelace_to_ada),
             reason: row.reason,
             destination: row.destination,
             treasury,
@@ -851,8 +821,6 @@ pub struct UtxoResponse {
     pub address_type: Option<String>,
     /// Amount in lovelace
     pub lovelace_amount: Option<i64>,
-    /// Amount in ADA
-    pub ada_amount: Option<f64>,
     /// Creation slot
     pub slot: Option<i64>,
     /// Block number
@@ -879,7 +847,6 @@ impl From<UtxoRow> for UtxoResponse {
             address: row.address,
             address_type: row.address_type,
             lovelace_amount: row.lovelace_amount,
-            ada_amount: row.lovelace_amount.map(lovelace_to_ada),
             slot: row.slot,
             block_number: row.block_number,
         }
@@ -949,9 +916,11 @@ pub struct MilestoneStats {
 /// Event statistics
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct EventStats {
-    /// Total events
-    pub total_count: i64,
-    /// Events by type
+    /// Total on-chain TOM events (from yaci_store)
+    pub on_chain_count: i64,
+    /// Total processed events (in treasury schema)
+    pub processed_count: i64,
+    /// On-chain events by type
     pub by_type: std::collections::HashMap<String, i64>,
 }
 
@@ -960,16 +929,10 @@ pub struct EventStats {
 pub struct FinancialStats {
     /// Total allocated to projects in lovelace
     pub total_allocated_lovelace: i64,
-    /// Total allocated to projects in ADA
-    pub total_allocated_ada: f64,
     /// Total withdrawn in lovelace
     pub total_withdrawn_lovelace: i64,
-    /// Total withdrawn in ADA
-    pub total_withdrawn_ada: f64,
     /// Current total balance in lovelace (from UTXOs)
     pub current_balance_lovelace: i64,
-    /// Current total balance in ADA
-    pub current_balance_ada: f64,
 }
 
 /// Sync status statistics
