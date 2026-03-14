@@ -337,14 +337,14 @@ SELECT
     COUNT(DISTINCT vc.id) FILTER (WHERE vc.status = 'completed') as completed_contracts,
     COUNT(DISTINCT vc.id) FILTER (WHERE vc.status = 'cancelled') as cancelled_contracts,
     COALESCE((
-        SELECT SUM(au.lovelace_amount)
-        FROM yaci_store.address_utxo au
-        WHERE au.owner_addr = tc.contract_address
+        SELECT SUM(u.lovelace_amount)
+        FROM treasury.utxos u
+        WHERE u.address = tc.contract_address AND NOT u.spent
     ), 0)::BIGINT as treasury_balance,
     COALESCE((
         SELECT COUNT(*)
-        FROM yaci_store.address_utxo au
-        WHERE au.owner_addr = tc.contract_address
+        FROM treasury.utxos u
+        WHERE u.address = tc.contract_address AND NOT u.spent
     ), 0) as utxo_count,
     (SELECT COUNT(*) FROM treasury.events WHERE treasury_id = tc.id) as total_events,
     (SELECT MAX(block_time) FROM treasury.events WHERE treasury_id = tc.id) as last_event_time,
@@ -394,11 +394,11 @@ SELECT
     COALESCE(SUM(m_totals.total_withdrawn), 0)::BIGINT as total_withdrawn_lovelace,
     -- Remaining (allocated - withdrawn)
     (COALESCE(SUM(vc.initial_amount_lovelace), 0) - COALESCE(SUM(m_totals.total_withdrawn), 0))::BIGINT as total_remaining_lovelace,
-    -- Treasury balance (actual UTXOs from yaci_store)
+    -- Treasury balance (unspent UTXOs at treasury address)
     COALESCE((
-        SELECT SUM(au.lovelace_amount)
-        FROM yaci_store.address_utxo au
-        WHERE au.owner_addr = tc.contract_address
+        SELECT SUM(u.lovelace_amount)
+        FROM treasury.utxos u
+        WHERE u.address = tc.contract_address AND NOT u.spent
     ), 0)::BIGINT as treasury_balance_lovelace,
     -- Project-level balance (sum of project UTXOs)
     COALESCE((

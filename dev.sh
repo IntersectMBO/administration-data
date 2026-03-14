@@ -109,69 +109,83 @@ case "$COMMAND" in
             fi
         done
         
-        # Wait a bit more for database to be fully initialized
-        sleep 3
-        
-        # Verify database exists, create if it doesn't
-        print_info "Verifying database exists..."
-        MAX_RETRIES=10
+        # Wait for database to be fully initialized
+        # POSTGRES_DB env var tells the entrypoint to create the database,
+        # but pg_isready returns true before init scripts finish.
+        print_info "Waiting for database to be ready..."
+        MAX_RETRIES=30
         RETRY_COUNT=0
-        DB_EXISTS=""
-        
+
         while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            # Try to check if database exists
             DB_EXISTS=$(docker-compose exec -T postgres psql -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='administration_data'" 2>/dev/null | tr -d '[:space:]' || echo "")
             if [ "$DB_EXISTS" = "1" ]; then
-                print_success "Database 'administration_data' exists"
+                print_success "Database 'administration_data' is ready"
                 break
             fi
-            
-            # If database doesn't exist, try to create it
-            if [ $RETRY_COUNT -eq 0 ]; then
-                print_info "Database 'administration_data' does not exist, creating..."
-            fi
-            
-            CREATE_RESULT=$(docker-compose exec -T postgres psql -U postgres -c "CREATE DATABASE administration_data;" 2>&1)
-            CREATE_EXIT_CODE=$?
-            
-            if [ $CREATE_EXIT_CODE -eq 0 ]; then
-                print_success "Database 'administration_data' created"
-                break
-            elif echo "$CREATE_RESULT" | grep -q "already exists"; then
-                print_success "Database 'administration_data' already exists"
-                break
-            else
-                RETRY_COUNT=$((RETRY_COUNT + 1))
-                if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-                    sleep 1
-                fi
+
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                sleep 1
             fi
         done
-        
-        if [ "$DB_EXISTS" != "1" ] && [ $CREATE_EXIT_CODE -ne 0 ] && ! echo "$CREATE_RESULT" | grep -q "already exists"; then
-            print_error "Failed to create database after $MAX_RETRIES attempts"
-            print_error "Last error: $CREATE_RESULT"
-            print_info "You may need to manually create the database or remove the postgres volume"
-            print_info "To remove volume: docker-compose down -v"
+
+        if [ "$DB_EXISTS" != "1" ]; then
+            # Database not created by entrypoint — try to create it manually
+            print_info "Database not found after ${MAX_RETRIES}s, attempting to create..."
+            if docker-compose exec -T postgres psql -U postgres -c "CREATE DATABASE administration_data;" 2>&1 | grep -qE "CREATE DATABASE|already exists"; then
+                print_success "Database 'administration_data' created"
+            else
+                print_error "Failed to create database 'administration_data'"
+                print_info "You may need to remove the postgres volume and restart: docker-compose down -v"
+                exit 1
+            fi
         fi
-        
+
         print_success "PostgreSQL is ready"
 
-        # Ensure treasury schema exists (YACI Store creates its own schema/tables via Flyway)
-        print_info "Ensuring treasury schema exists..."
+        # Create treasury schema tables (views will fail silently since yaci_store doesn't exist yet)
+        print_info "Creating treasury schema tables..."
+        docker-compose exec -T postgres psql -U postgres -d administration_data -c "
+            CREATE SCHEMA IF NOT EXISTS treasury;
+        " 2>/dev/null || true
         docker-compose exec -T postgres psql -U postgres -d administration_data \
             -f /docker-entrypoint-initdb.d/02-treasury-schema.sql 2>/dev/null || true
-        print_success "Database schemas ready"
 
-        # Start indexer if JAR is available
+        # Start indexer if JAR is available — Flyway will create the yaci_store schema
         if [ "$INDEXER_AVAILABLE" = true ]; then
             print_info "Starting indexer..."
             docker-compose up -d indexer
+
+            # Wait for indexer to complete Flyway migrations (yaci_store tables must exist for treasury views)
+            print_info "Waiting for indexer to initialize (Flyway migrations)..."
+            INDEXER_RETRIES=0
+            INDEXER_MAX=60
+            while [ $INDEXER_RETRIES -lt $INDEXER_MAX ]; do
+                if docker-compose exec -T postgres psql -U postgres -d administration_data -tAc \
+                    "SELECT 1 FROM information_schema.tables WHERE table_schema='yaci_store' AND table_name='address_utxo'" 2>/dev/null | grep -q 1; then
+                    break
+                fi
+                INDEXER_RETRIES=$((INDEXER_RETRIES + 1))
+                sleep 1
+            done
+
+            if [ $INDEXER_RETRIES -ge $INDEXER_MAX ]; then
+                print_warning "Indexer did not create yaci_store tables within ${INDEXER_MAX}s — treasury views may be incomplete"
+            else
+                print_success "Indexer initialized (Flyway migrations complete)"
+                # Now re-run treasury schema to create views that reference yaci_store tables
+                print_info "Creating treasury views..."
+                docker-compose exec -T postgres psql -U postgres -d administration_data \
+                    -f /docker-entrypoint-initdb.d/02-treasury-schema.sql 2>/dev/null || true
+                print_success "Treasury views created"
+            fi
+
             print_success "Indexer started (check logs with: docker logs administration-indexer -f)"
         else
             print_warning "Skipping indexer (JAR file not found)"
+            print_warning "Treasury views referencing yaci_store will not be created until indexer runs"
         fi
-        
+
         # Start API
         if [ "$API_AVAILABLE" = true ]; then
             print_info "Starting API (Rust)..."

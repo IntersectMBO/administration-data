@@ -136,7 +136,7 @@ SELECT * FROM treasury.v_treasury_summary;
 
 Fields: treasury_id, contract_instance, contract_address, stake_credential, status, publish_tx_hash, publish_time, initialized_tx_hash, initialized_at, permissions, vendor_contract_count, active_contracts, completed_contracts, cancelled_contracts, treasury_balance, utxo_count, total_events, last_event_time, created_at, updated_at
 
-Note: `treasury_balance` and `utxo_count` are sourced from `yaci_store.address_utxo` (live unspent UTXOs), not from `treasury.utxos`.
+Note: `treasury_balance` and `utxo_count` are sourced from `treasury.utxos` (unspent UTXOs tracked by the sync service).
 
 ### treasury.v_vendor_contracts_summary
 Vendor contracts with milestone counts, financials, and UTXO balance.
