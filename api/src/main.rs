@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use tower_http::cors::{Any, CorsLayer};
 use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
+use utoipa_swagger_ui::{Config, SwaggerUi};
 
 fn env_u16(key: &str, default: u16) -> u16 {
     std::env::var(key)
@@ -78,11 +78,17 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Background sync task started");
 
     // Build application routes
+    let swagger_config = Config::from("/api-docs/openapi.json")
+        .use_base_layout()
+        .query_config_enabled(false)
+        .supported_submit_methods(["get"])
+        .validator_url("none");
+
     let app = Router::new()
         // Health check
         .route("/health", get(health_check))
         // OpenAPI / Swagger UI
-        .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        .merge(SwaggerUi::new("/docs").url("/api-docs/openapi.json", ApiDoc::openapi()).config(swagger_config))
         // V1 API routes
         .nest("/api/v1", routes::v1::router())
         .layer(Extension(pool))
