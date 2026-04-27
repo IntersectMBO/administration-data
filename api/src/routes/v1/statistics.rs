@@ -149,15 +149,16 @@ async fn get_event_stats(pool: &PgPool) -> Result<EventStats, StatusCode> {
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Get on-chain TOM event count and breakdown by type from yaci_store
+    // Get on-chain TOM event count and breakdown by type from yaci_store.
+    // Event type lives at body.body.event in the metadata (see event_processor::process_event).
     let on_chain_rows = sqlx::query_as::<_, (String, i64)>(
         r#"
         SELECT
-            COALESCE(body::jsonb->>'type', 'unknown') as event_type,
+            COALESCE(LOWER(body::jsonb -> 'body' ->> 'event'), 'unknown') AS event_type,
             COUNT(*)
         FROM yaci_store.transaction_metadata
         WHERE label = '1694'
-        GROUP BY event_type
+        GROUP BY 1
         ORDER BY COUNT(*) DESC
         "#
     )

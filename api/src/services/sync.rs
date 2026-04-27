@@ -91,6 +91,13 @@ async fn sync_new_events(pool: &PgPool, processor: &EventProcessor) -> anyhow::R
 
     tracing::info!("Processing {} new TOM events", rows.len());
 
+    // Pre-fetch UTXOs from yaci_store into treasury.utxos before processing.
+    // This captures UTXO data before YACI Store can prune spent UTXOs (~2160 blocks).
+    let tx_hashes: Vec<String> = rows.iter().map(|r| r.tx_hash.clone()).collect();
+    if let Err(e) = processor.pre_fetch_utxos(&tx_hashes).await {
+        tracing::warn!("UTXO pre-fetch failed (non-fatal): {}", e);
+    }
+
     let mut last_processed_slot = last_slot;
     let mut last_processed_tx = String::new();
     let mut last_block = 0i64;
