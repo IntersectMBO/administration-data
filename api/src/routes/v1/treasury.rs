@@ -85,7 +85,7 @@ pub async fn get_treasury_utxos(
             lovelace_amount,
             slot,
             block_number
-        FROM treasury.utxos
+        FROM treasury.utxo_history
         WHERE address = $1 AND NOT spent
         ORDER BY slot DESC
         "#

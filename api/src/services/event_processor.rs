@@ -215,7 +215,7 @@ impl EventProcessor {
         let other_identifiers = if other_identifiers.is_empty() { None } else { Some(other_identifiers) };
 
         // Get contract address, initial amount, and inline datum from fund tx output
-        // (with fallback to treasury.utxos for pruned UTXOs)
+        // (with fallback to treasury.utxo_history for pruned UTXOs)
         let (contract_address, initial_amount, fund_inline_datum) = self.get_script_utxo_for_tx(&event.tx_hash).await?;
 
         // Get or create treasury contract
@@ -253,7 +253,7 @@ impl EventProcessor {
                 .fetch_optional(&self.pool)
                 .await?;
 
-                // Fallback: use treasury.utxos for pruned input UTXOs
+                // Fallback: use treasury.utxo_history for pruned input UTXOs
                 let treasury_addr = match treasury_addr {
                     Some(addr) => Some(addr),
                     None => sqlx::query_scalar::<_, Option<String>>(
@@ -261,7 +261,7 @@ impl EventProcessor {
                         SELECT DISTINCT u.address
                         FROM yaci_store.transaction t
                         CROSS JOIN LATERAL jsonb_array_elements(t.inputs::jsonb) AS inp
-                        JOIN treasury.utxos u
+                        JOIN treasury.utxo_history u
                             ON u.tx_hash = inp->>'tx_hash'
                             AND u.output_index = (inp->>'output_index')::smallint
                         WHERE t.tx_hash = $1 AND u.address LIKE 'addr1x%' AND u.address != $2
@@ -403,14 +403,14 @@ impl EventProcessor {
                     // Record this UTXO with the vendor_contract_id for future event lookups
                     sqlx::query(
                         r#"
-                        INSERT INTO treasury.utxos (tx_hash, output_index, vendor_contract_id, slot, block_number, address, address_type, lovelace_amount, spent)
+                        INSERT INTO treasury.utxo_history (tx_hash, output_index, vendor_contract_id, slot, block_number, address, address_type, lovelace_amount, spent)
                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, false)
                         ON CONFLICT (tx_hash, output_index) DO UPDATE
-                            SET vendor_contract_id = COALESCE(EXCLUDED.vendor_contract_id, treasury.utxos.vendor_contract_id),
-                                address = COALESCE(EXCLUDED.address, treasury.utxos.address),
-                                address_type = COALESCE(EXCLUDED.address_type, treasury.utxos.address_type),
-                                lovelace_amount = COALESCE(EXCLUDED.lovelace_amount, treasury.utxos.lovelace_amount),
-                                block_number = COALESCE(EXCLUDED.block_number, treasury.utxos.block_number)
+                            SET vendor_contract_id = COALESCE(EXCLUDED.vendor_contract_id, treasury.utxo_history.vendor_contract_id),
+                                address = COALESCE(EXCLUDED.address, treasury.utxo_history.address),
+                                address_type = COALESCE(EXCLUDED.address_type, treasury.utxo_history.address_type),
+                                lovelace_amount = COALESCE(EXCLUDED.lovelace_amount, treasury.utxo_history.lovelace_amount),
+                                block_number = COALESCE(EXCLUDED.block_number, treasury.utxo_history.block_number)
                         "#
                     )
                     .bind(tx_hash)
@@ -471,7 +471,7 @@ impl EventProcessor {
 
                     // Store raw CBOR on the UTXO tracking row
                     sqlx::query(
-                        "UPDATE treasury.utxos SET inline_datum_cbor = $1 WHERE tx_hash = $2 AND vendor_contract_id = $3"
+                        "UPDATE treasury.utxo_history SET inline_datum_cbor = $1 WHERE tx_hash = $2 AND vendor_contract_id = $3"
                     )
                     .bind(&datum_hex)
                     .bind(&event.tx_hash)
@@ -522,6 +522,7 @@ impl EventProcessor {
                 for (milestone_id, milestone_data) in obj {
                     let description = extract_text_from_value(Some(milestone_data.get("description").unwrap_or(&Value::Null)));
                     let evidence = milestone_data.get("evidence").cloned();
+                    let order_hint = canonical_milestone_order(milestone_id);
 
                     let db_milestone_id: Option<i32> = sqlx::query_scalar(
                         r#"
@@ -531,7 +532,9 @@ impl EventProcessor {
                             complete_time = $2,
                             complete_description = $3,
                             evidence = $4
-                        WHERE vendor_contract_id = $5 AND milestone_id = $6 AND NOT archived
+                        WHERE vendor_contract_id = $5
+                          AND NOT archived
+                          AND (milestone_id = $6 OR milestone_order = $7)
                         RETURNING id
                         "#
                     )
@@ -541,6 +544,7 @@ impl EventProcessor {
                     .bind(&evidence)
                     .bind(vc_id)
                     .bind(milestone_id)
+                    .bind(order_hint)
                     .fetch_optional(&self.pool)
                     .await?;
 
@@ -551,13 +555,16 @@ impl EventProcessor {
             }
 
             if let Some(milestone_id) = event_body.get("milestone").and_then(|m| m.as_str()) {
+                let order_hint = canonical_milestone_order(milestone_id);
                 let db_milestone_id: Option<i32> = sqlx::query_scalar(
                     r#"
                     UPDATE treasury.milestones
                     SET evidence_provided = TRUE,
                         complete_tx_hash = $1,
                         complete_time = $2
-                    WHERE vendor_contract_id = $3 AND milestone_id = $4 AND NOT archived
+                    WHERE vendor_contract_id = $3
+                      AND NOT archived
+                      AND (milestone_id = $4 OR milestone_order = $5)
                     RETURNING id
                     "#
                 )
@@ -565,6 +572,7 @@ impl EventProcessor {
                 .bind(event.block_time)
                 .bind(vc_id)
                 .bind(milestone_id)
+                .bind(order_hint)
                 .fetch_optional(&self.pool)
                 .await?;
 
@@ -582,7 +590,9 @@ impl EventProcessor {
     /// Process a disburse event - treasury-level fund movement (does not touch milestones)
     async fn process_disburse(&self, event: &RawTomEvent, body: &Value, instance: &str) -> anyhow::Result<()> {
         let event_body = body.get("body").unwrap_or(body);
-        let destination = extract_text(event_body, "destination");
+        // Per TOM spec, `destination` is an object `{label, details}`. Preserve the
+        // full object in JSONB so neither sub-field is lost (KI-API-01).
+        let destination = event_body.get("destination").cloned();
 
         // Disburse is a treasury-level operation — look up treasury_id, not vendor_contract_id
         let treasury_id: Option<i32> = if !instance.is_empty() {
@@ -638,7 +648,7 @@ impl EventProcessor {
             Some(amt) if amt > 0 => Some(amt),
             _ => {
                 let fallback: Option<i64> = sqlx::query_scalar(
-                    "SELECT COALESCE(SUM(lovelace_amount)::bigint, 0) FROM treasury.utxos WHERE tx_hash = $1 AND address NOT LIKE 'addr1x%'"
+                    "SELECT COALESCE(SUM(lovelace_amount)::bigint, 0) FROM treasury.utxo_history WHERE tx_hash = $1 AND address NOT LIKE 'addr1x%'"
                 )
                 .bind(&event.tx_hash)
                 .fetch_optional(&self.pool)
@@ -655,6 +665,7 @@ impl EventProcessor {
         if let Some(vc_id) = vendor_contract_id {
             if let Some(obj) = event_body.get("milestones").and_then(|m| m.as_object()) {
                 for (milestone_id, _milestone_data) in obj {
+                    let order_hint = canonical_milestone_order(milestone_id);
                     let db_milestone_id: Option<i32> = sqlx::query_scalar(
                         r#"
                         UPDATE treasury.milestones
@@ -662,7 +673,9 @@ impl EventProcessor {
                             withdraw_tx_hash = $1,
                             withdraw_time = $2,
                             withdraw_amount = $3
-                        WHERE vendor_contract_id = $4 AND milestone_id = $5 AND NOT archived
+                        WHERE vendor_contract_id = $4
+                          AND NOT archived
+                          AND (milestone_id = $5 OR milestone_order = $6)
                         RETURNING id
                         "#
                     )
@@ -671,6 +684,7 @@ impl EventProcessor {
                     .bind(withdraw_amount)
                     .bind(vc_id)
                     .bind(milestone_id)
+                    .bind(order_hint)
                     .fetch_optional(&self.pool)
                     .await?;
 
@@ -681,6 +695,7 @@ impl EventProcessor {
             }
 
             if let Some(milestone_id) = event_body.get("milestone").and_then(|m| m.as_str()) {
+                let order_hint = canonical_milestone_order(milestone_id);
                 let db_milestone_id: Option<i32> = sqlx::query_scalar(
                     r#"
                     UPDATE treasury.milestones
@@ -688,7 +703,9 @@ impl EventProcessor {
                         withdraw_tx_hash = $1,
                         withdraw_time = $2,
                         withdraw_amount = $3
-                    WHERE vendor_contract_id = $4 AND milestone_id = $5 AND NOT archived
+                    WHERE vendor_contract_id = $4
+                      AND NOT archived
+                      AND (milestone_id = $5 OR milestone_order = $6)
                     RETURNING id
                     "#
                 )
@@ -697,6 +714,7 @@ impl EventProcessor {
                 .bind(withdraw_amount)
                 .bind(vc_id)
                 .bind(milestone_id)
+                .bind(order_hint)
                 .fetch_optional(&self.pool)
                 .await?;
 
@@ -1005,7 +1023,7 @@ impl EventProcessor {
         milestone_id: Option<i32>,
         amount_lovelace: Option<i64>,
         reason: &Option<String>,
-        destination: &Option<String>,
+        destination: &Option<Value>,
         body: &Value,
     ) -> anyhow::Result<()> {
         sqlx::query(
@@ -1040,7 +1058,7 @@ impl EventProcessor {
         Ok(())
     }
 
-    /// Find vendor_contract_id by looking up input UTXOs in our treasury.utxos tracking table.
+    /// Find vendor_contract_id by looking up input UTXOs in our treasury.utxo_history tracking table.
     /// When a fund event is processed, its output UTXOs are recorded with the vendor_contract_id.
     /// Subsequent events (complete/withdraw/etc) spend those UTXOs, so we can find the project
     /// by looking at which tracked UTXOs are being spent as inputs.
@@ -1076,7 +1094,7 @@ impl EventProcessor {
             let vendor_contract_id: Option<i32> = sqlx::query_scalar(
                 r#"
                 SELECT vendor_contract_id
-                FROM treasury.utxos
+                FROM treasury.utxo_history
                 WHERE tx_hash = $1 AND output_index = $2 AND vendor_contract_id IS NOT NULL
                 "#
             )
@@ -1124,7 +1142,7 @@ impl EventProcessor {
 
         // Get the input UTXO's script address as a fallback for pruned outputs
         let input_address: Option<String> = sqlx::query_scalar(
-            "SELECT address FROM treasury.utxos WHERE tx_hash = $1 AND output_index = $2"
+            "SELECT address FROM treasury.utxo_history WHERE tx_hash = $1 AND output_index = $2"
         )
         .bind(&input_tx_hash)
         .bind(input_output_index)
@@ -1135,7 +1153,7 @@ impl EventProcessor {
         // Mark this UTXO as spent and record the new outputs
         sqlx::query(
             r#"
-            UPDATE treasury.utxos
+            UPDATE treasury.utxo_history
             SET spent = true, spent_tx_hash = $1
             WHERE tx_hash = $2 AND output_index = $3
             "#
@@ -1177,14 +1195,14 @@ impl EventProcessor {
 
                     sqlx::query(
                         r#"
-                        INSERT INTO treasury.utxos (tx_hash, output_index, vendor_contract_id, address, address_type, lovelace_amount, inline_datum_cbor, spent)
+                        INSERT INTO treasury.utxo_history (tx_hash, output_index, vendor_contract_id, address, address_type, lovelace_amount, inline_datum_cbor, spent)
                         VALUES ($1, $2, $3, $4, $5, $6, $7, false)
                         ON CONFLICT (tx_hash, output_index) DO UPDATE
                             SET vendor_contract_id = EXCLUDED.vendor_contract_id,
-                                address = COALESCE(EXCLUDED.address, treasury.utxos.address),
-                                address_type = COALESCE(EXCLUDED.address_type, treasury.utxos.address_type),
-                                lovelace_amount = COALESCE(EXCLUDED.lovelace_amount, treasury.utxos.lovelace_amount),
-                                inline_datum_cbor = COALESCE(EXCLUDED.inline_datum_cbor, treasury.utxos.inline_datum_cbor)
+                                address = COALESCE(EXCLUDED.address, treasury.utxo_history.address),
+                                address_type = COALESCE(EXCLUDED.address_type, treasury.utxo_history.address_type),
+                                lovelace_amount = COALESCE(EXCLUDED.lovelace_amount, treasury.utxo_history.lovelace_amount),
+                                inline_datum_cbor = COALESCE(EXCLUDED.inline_datum_cbor, treasury.utxo_history.inline_datum_cbor)
                         "#
                     )
                     .bind(out_tx_hash)
@@ -1203,7 +1221,7 @@ impl EventProcessor {
         Ok(Some(vc_id))
     }
 
-    /// Pre-fetch UTXOs from yaci_store into treasury.utxos before they can be pruned.
+    /// Pre-fetch UTXOs from yaci_store into treasury.utxo_history before they can be pruned.
     /// Called before processing a batch of events to capture UTXO data that YACI Store
     /// may prune (spent UTXOs are removed after ~2160 blocks / ~10 days).
     pub async fn pre_fetch_utxos(&self, tx_hashes: &[String]) -> anyhow::Result<()> {
@@ -1214,14 +1232,14 @@ impl EventProcessor {
         // Pre-fetch output UTXOs for event transactions
         let output_result = sqlx::query(
             r#"
-            INSERT INTO treasury.utxos (tx_hash, output_index, address, lovelace_amount, inline_datum_cbor)
+            INSERT INTO treasury.utxo_history (tx_hash, output_index, address, lovelace_amount, inline_datum_cbor)
             SELECT au.tx_hash, au.output_index, au.owner_addr, au.lovelace_amount, au.inline_datum
             FROM yaci_store.address_utxo au
             WHERE au.tx_hash = ANY($1)
             ON CONFLICT (tx_hash, output_index) DO UPDATE
-                SET address = COALESCE(EXCLUDED.address, treasury.utxos.address),
-                    lovelace_amount = COALESCE(EXCLUDED.lovelace_amount, treasury.utxos.lovelace_amount),
-                    inline_datum_cbor = COALESCE(EXCLUDED.inline_datum_cbor, treasury.utxos.inline_datum_cbor)
+                SET address = COALESCE(EXCLUDED.address, treasury.utxo_history.address),
+                    lovelace_amount = COALESCE(EXCLUDED.lovelace_amount, treasury.utxo_history.lovelace_amount),
+                    inline_datum_cbor = COALESCE(EXCLUDED.inline_datum_cbor, treasury.utxo_history.inline_datum_cbor)
             "#
         )
         .bind(tx_hashes)
@@ -1231,7 +1249,7 @@ impl EventProcessor {
         // Pre-fetch input-side UTXOs (outputs being spent by these transactions)
         let input_result = sqlx::query(
             r#"
-            INSERT INTO treasury.utxos (tx_hash, output_index, address, lovelace_amount, inline_datum_cbor)
+            INSERT INTO treasury.utxo_history (tx_hash, output_index, address, lovelace_amount, inline_datum_cbor)
             SELECT au.tx_hash, au.output_index, au.owner_addr, au.lovelace_amount, au.inline_datum
             FROM yaci_store.transaction t
             CROSS JOIN LATERAL jsonb_array_elements(t.inputs::jsonb) AS inp
@@ -1240,9 +1258,9 @@ impl EventProcessor {
                 AND au.output_index = (inp->>'output_index')::smallint
             WHERE t.tx_hash = ANY($1)
             ON CONFLICT (tx_hash, output_index) DO UPDATE
-                SET address = COALESCE(EXCLUDED.address, treasury.utxos.address),
-                    lovelace_amount = COALESCE(EXCLUDED.lovelace_amount, treasury.utxos.lovelace_amount),
-                    inline_datum_cbor = COALESCE(EXCLUDED.inline_datum_cbor, treasury.utxos.inline_datum_cbor)
+                SET address = COALESCE(EXCLUDED.address, treasury.utxo_history.address),
+                    lovelace_amount = COALESCE(EXCLUDED.lovelace_amount, treasury.utxo_history.lovelace_amount),
+                    inline_datum_cbor = COALESCE(EXCLUDED.inline_datum_cbor, treasury.utxo_history.inline_datum_cbor)
             "#
         )
         .bind(tx_hashes)
@@ -1251,7 +1269,7 @@ impl EventProcessor {
 
         let total = output_result.rows_affected() + input_result.rows_affected();
         if total > 0 {
-            tracing::debug!("Pre-fetched {} UTXOs ({} outputs + {} inputs) into treasury.utxos",
+            tracing::debug!("Pre-fetched {} UTXOs ({} outputs + {} inputs) into treasury.utxo_history",
                 total, output_result.rows_affected(), input_result.rows_affected());
         }
 
@@ -1259,7 +1277,7 @@ impl EventProcessor {
     }
 
     /// Fetch script UTXO data (address, lovelace_amount, inline_datum) for a transaction.
-    /// Tries yaci_store.address_utxo first, falls back to pre-fetched treasury.utxos.
+    /// Tries yaci_store.address_utxo first, falls back to pre-fetched treasury.utxo_history.
     async fn get_script_utxo_for_tx(&self, tx_hash: &str) -> anyhow::Result<(Option<String>, Option<i64>, Option<String>)> {
         let result: Option<(String, Option<i64>, Option<String>)> = sqlx::query_as(
             "SELECT owner_addr, lovelace_amount, inline_datum FROM yaci_store.address_utxo WHERE tx_hash = $1 AND owner_addr LIKE 'addr1x%' LIMIT 1"
@@ -1272,9 +1290,9 @@ impl EventProcessor {
             return Ok((Some(addr), amt, datum));
         }
 
-        // Fallback to pre-fetched treasury.utxos
+        // Fallback to pre-fetched treasury.utxo_history
         let result: Option<(Option<String>, Option<i64>, Option<String>)> = sqlx::query_as(
-            "SELECT address, lovelace_amount, inline_datum_cbor FROM treasury.utxos WHERE tx_hash = $1 AND address LIKE 'addr1x%' LIMIT 1"
+            "SELECT address, lovelace_amount, inline_datum_cbor FROM treasury.utxo_history WHERE tx_hash = $1 AND address LIKE 'addr1x%' LIMIT 1"
         )
         .bind(tx_hash)
         .fetch_optional(&self.pool)
@@ -1282,7 +1300,7 @@ impl EventProcessor {
 
         if let Some((addr, amt, datum)) = result {
             if addr.is_some() {
-                tracing::debug!("Used treasury.utxos fallback for tx {} (yaci_store UTXO pruned)", tx_hash);
+                tracing::debug!("Used treasury.utxo_history fallback for tx {} (yaci_store UTXO pruned)", tx_hash);
             }
             return Ok((addr, amt, datum));
         }
@@ -1291,7 +1309,7 @@ impl EventProcessor {
     }
 
     /// Look up a specific UTXO by tx_hash + output_index.
-    /// Tries yaci_store.address_utxo first, falls back to treasury.utxos.
+    /// Tries yaci_store.address_utxo first, falls back to treasury.utxo_history.
     async fn lookup_utxo(&self, tx_hash: &str, output_index: i16) -> anyhow::Result<(Option<String>, Option<i64>, Option<String>)> {
         let result: Option<(String, Option<i64>, Option<String>)> = sqlx::query_as(
             "SELECT owner_addr, lovelace_amount, inline_datum FROM yaci_store.address_utxo WHERE tx_hash = $1 AND output_index = $2 LIMIT 1"
@@ -1306,7 +1324,7 @@ impl EventProcessor {
         }
 
         let result: Option<(Option<String>, Option<i64>, Option<String>)> = sqlx::query_as(
-            "SELECT address, lovelace_amount, inline_datum_cbor FROM treasury.utxos WHERE tx_hash = $1 AND output_index = $2 LIMIT 1"
+            "SELECT address, lovelace_amount, inline_datum_cbor FROM treasury.utxo_history WHERE tx_hash = $1 AND output_index = $2 LIMIT 1"
         )
         .bind(tx_hash)
         .bind(output_index)
@@ -1326,11 +1344,11 @@ impl EventProcessor {
         .fetch_optional(&self.pool)
         .await?;
 
-        // Fallback to pre-fetched treasury.utxos
+        // Fallback to pre-fetched treasury.utxo_history
         let inline_datum = match inline_datum {
             Some(d) => Some(d),
             None => sqlx::query_scalar::<_, Option<String>>(
-                "SELECT inline_datum_cbor FROM treasury.utxos WHERE tx_hash = $1 AND address LIKE 'addr1x%' AND inline_datum_cbor IS NOT NULL LIMIT 1"
+                "SELECT inline_datum_cbor FROM treasury.utxo_history WHERE tx_hash = $1 AND address LIKE 'addr1x%' AND inline_datum_cbor IS NOT NULL LIMIT 1"
             )
             .bind(tx_hash)
             .fetch_optional(&self.pool)
@@ -1413,10 +1431,21 @@ fn extract_milestone_label_description(
         }
     }
 
-    // No label — try to derive from acceptance_criteria
+    // No label — try to derive from acceptance_criteria, then fall back to
+    // the first line of the description (covers `UTXO-*` projects whose
+    // metadata uses `description` instead of `acceptanceCriteria`).
+    // See KI-MIL-01 in docs/known-issues.md.
     let ac = match acceptance_criteria {
         Some(ac) if !ac.is_empty() => ac,
-        _ => return (None, raw_description),
+        _ => {
+            if let Some(ref desc) = raw_description {
+                let label = desc.lines().next().unwrap_or(desc).trim().to_string();
+                if !label.is_empty() {
+                    return (Some(label), raw_description);
+                }
+            }
+            return (None, raw_description);
+        }
     };
 
     // Look for "Deliverables:" separator (case-insensitive find)
@@ -1447,6 +1476,19 @@ fn extract_milestone_label_description(
 /// Extract milestone identifier hints from a complete/withdraw event body.
 /// Used to disambiguate which vendor contract a tx belongs to when its inputs span
 /// multiple project chains (e.g. fee/collateral pulled from a sibling contract).
+/// Convert a metadata milestone key (`m-N` 0-indexed or `MS-N` 1-indexed) to
+/// its canonical 1-indexed `milestone_order`. Returns `None` for unrecognised
+/// formats. See `docs/known-issues.md` `KI-OC-01` for context.
+fn canonical_milestone_order(key: &str) -> Option<i32> {
+    if let Some(rest) = key.strip_prefix("m-") {
+        rest.parse::<i32>().ok().map(|n| n + 1)
+    } else if let Some(rest) = key.strip_prefix("MS-") {
+        rest.parse::<i32>().ok()
+    } else {
+        None
+    }
+}
+
 fn collect_milestone_id_hints(event_body: &Value) -> Vec<String> {
     let mut hints: Vec<String> = Vec::new();
     if let Some(obj) = event_body.get("milestones").and_then(|m| m.as_object()) {

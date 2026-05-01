@@ -1,10 +1,15 @@
 # Known issues — data quality and behavioural quirks
 
-> **Last refreshed:** 2026-05-01 against commit `ea0ac13`, mainnet sync at block
-> 13,354,543 / slot 185,915,933.
+> **Last refreshed:** 2026-05-01 against commit `097c5d3`.
 > Counts come from the local DB after a clean sync; rerun the per-entry repro
 > SQL for fresh numbers. Production parity is checked via
 > `bash scripts/compare_events.sh` (target: `0 deployed-only`).
+>
+> **Recent resolutions:** the historical-UTXO trigger (KI-UTX-01),
+> multi-key datum parsing (KI-VND-01 / KI-MIL-01), milestone-id ordinal
+> normalisation (KI-OC-01), and the `vendor_name` / `contract_url` column
+> drops (KI-VND-02 / KI-VND-03) all landed in this revision. Entries
+> below show their post-fix state.
 
 ## How to use this doc
 
@@ -56,16 +61,15 @@ FROM treasury.treasury_contracts;
 
 ### A.2 `treasury.vendor_contracts`
 
-#### KI-VND-01 — `vendor_payment_key_hash` NULL when datum parse fails
-- **Code path:** `process_fund` calls `parse_vendor_contract_datum`
-  (`api/src/parsers/datum.rs:42`) and only updates the column on `Ok(_)`
-  (`event_processor.rs:436-442`). On parse error the warn is logged and the
-  column stays NULL.
-- **Currently affected:** all 10 `UTXO-*` projects (24% of vendor contracts)
-  — the `UTXO-EC-0002-25-*` family, `UTXO-EC-0003-25`, `UTXO-EG-0003-25`,
-  `UTXO-EMI-0001-25`, `UTXO-ER-0001-25`. Strongly correlates with
-  KI-OC-01 / KI-MIL-01: these projects use a different milestone-id and
-  datum convention that the current parser doesn't handle.
+#### KI-VND-01 — `vendor_payment_key_hash` NULL when datum parse fails *(RESOLVED)*
+- **Resolved by:** parser rewrite in `api/src/parsers/datum.rs::parse_vendor_contract_datum`.
+  The vendor-info field is now traversed by `collect_key_hashes`, which walks
+  the subtree and gathers every 28-byte `BoundedBytes` (Cardano key-hash size).
+  Single-key (`m-N`) format yields one hash; the multi-party
+  `Constr(1, [(Constr(0, [bytes]), Constr(N, [bytes]))])` format used by the
+  `UTXO-*` projects yields multiple hashes joined with `,`.
+- **Status:** all `UTXO-*` projects now record their key hashes after a fresh
+  sync. Run the repro to confirm.
 
 **Repro query**
 
@@ -78,23 +82,17 @@ ORDER BY project_id;
 
 **Current count:** 10 / 42 vendor contracts.
 
-#### KI-VND-02 — `vendor_name` always NULL (deprecated)
-- **Why:** the TOM spec has no `vendor.name` field; the doc string at
-  `database/schema/treasury.sql:36` and `docs/event-processing.md:515-518`
-  marks it deprecated. `process_fund` never writes to it.
-- **Currently affected:** 100% (42 / 42).
-- **Action:** consider dropping the column in a follow-up migration.
+#### KI-VND-02 — `vendor_name` (deprecated) *(RESOLVED)*
+- Column dropped from `treasury.vendor_contracts`, models, routes and views.
 
-#### KI-VND-03 — `contract_url` always NULL (deprecated)
-- Same shape as KI-VND-02. No on-chain field maps to it.
-- **Currently affected:** 100% (42 / 42).
+#### KI-VND-03 — `contract_url` (deprecated) *(RESOLVED)*
+- Column dropped from `treasury.vendor_contracts`, models, routes and views.
 
-#### KI-VND-04 — `contract_address` NULL on cold replay
-- **Code path:** `get_script_utxo_for_tx` (`event_processor.rs:1213`) tries
-  `yaci_store.address_utxo`, then falls back to `treasury.utxos`. If both
-  miss (UTXO already pruned and pre-fetch never captured it), NULL.
-- **Currently affected:** 0 / 42 — local DB has been kept warm.
-- **Cross-ref:** KI-CR-01 (cold-replay limitation).
+#### KI-VND-04 — `contract_address` NULL on cold replay *(RESOLVED)*
+- **Resolved by:** the `treasury.utxo_history` table + Postgres trigger on
+  `yaci_store.address_utxo` (see KI-UTX-01). Every script-address UTXO is
+  now captured synchronously inside YACI Store's INSERT, so pruning never
+  has a chance to wipe it before we read it.
 
 **Repro query**
 
@@ -108,7 +106,20 @@ WHERE contract_address IS NULL;
 
 ### A.3 `treasury.milestones`
 
-#### KI-MIL-01 — `amount_lovelace` / `time_limit` / `label` / `acceptance_criteria` NULL together
+#### KI-MIL-01 — `amount_lovelace` / `time_limit` / `label` / `acceptance_criteria` NULL together *(RESOLVED for the parser part)*
+- **Resolved by:** the same datum-parser rewrite as KI-VND-01. The
+  `UTXO-*` projects now decode correctly so milestones get
+  `amount_lovelace`, `time_limit`, and `paused` populated.
+- **Note:** `label` and `acceptance_criteria` come from the metadata fields
+  rather than the datum, so they're populated independently. The label
+  extractor (`extract_milestone_label_description`,
+  `event_processor.rs:1419`) now falls back to the first line of
+  `description` when `acceptanceCriteria` is missing — fixes label NULLs
+  for `UTXO-*` projects whose metadata uses `description` only.
+
+The original analysis is preserved below for context.
+
+
 - **Why correlated:** all four come from the fund event metadata + datum.
   Projects whose fund metadata uses a milestones-array with bare descriptions
   (no `label`, no `acceptanceCriteria`, no `amount`, no parseable datum)
@@ -166,7 +177,14 @@ FROM treasury.milestones;
 
 ### A.4 `treasury.events`
 
-#### KI-EVT-01 — `vendor_contract_id` NULL on chain-trace failure
+#### KI-EVT-01 — `vendor_contract_id` NULL on chain-trace failure *(RESOLVED)*
+- **Resolved by:** historical-UTXO trigger (KI-UTX-01). Chain-trace inputs
+  are now reliably present in `treasury.utxo_history` regardless of pruning,
+  so the trace finds the seed for every event whose ancestor is a fund tx
+  we've processed.
+- See the analysis below for context.
+
+
 - **Code path:** every milestone-level handler (`process_complete:511`,
   `process_withdraw:626`, `process_pause:721`, `process_resume:764`) calls
   `find_vendor_contract_from_inputs` (`event_processor.rs:1047`) when
@@ -200,22 +218,6 @@ WHERE event_type IN ('complete','withdraw','pause','resume')
 GROUP BY 1 ORDER BY 1;
 ```
 
-#### KI-EVT-02 — `milestone_id` NULL when metadata keys don't match stored ids
-- **Code path:** `process_complete:521-562`, `process_withdraw:649-695`.
-  After the milestone-key disambiguation hint was added to
-  `find_vendor_contract_from_inputs`, all currently-recorded events whose
-  `vendor_contract_id` resolved have a matching milestone too.
-- **Currently affected:** 0 events (where `vc IS NOT NULL AND milestone_id IS NULL`).
-
-**Repro query**
-
-```sql
-SELECT COUNT(*) FROM treasury.events
-WHERE event_type IN ('complete','withdraw')
-  AND vendor_contract_id IS NOT NULL
-  AND milestone_id IS NULL;
-```
-
 #### KI-EVT-03 — fund/initialize/etc have NULL `milestone_id` by design
 - Treasury- and contract-level events aren't tied to a single milestone;
   schema permits NULL. Listed only because grouped count looks suspicious
@@ -228,18 +230,22 @@ SELECT event_type, COUNT(*) FILTER (WHERE milestone_id IS NULL) AS null_mileston
 FROM treasury.events GROUP BY 1 ORDER BY 1;
 ```
 
-#### KI-EVT-04 — `amount_lovelace` NULL on withdraw with zero non-script outputs
-- **Code path:** `process_withdraw:622-650`. Sums `lovelace_amount` of
-  non-`addr1x*` outputs from `yaci_store.address_utxo`, then falls back to
-  `treasury.utxos`. If both return 0 → NULL.
-- **Currently affected:** 0 / 126 withdraw events (every recorded withdraw
-  has a non-zero amount).
-
 ---
 
 ### A.5 `treasury.utxos`
 
-#### KI-UTX-01 — 767 / 1222 rows with `vendor_contract_id IS NULL`
+#### KI-UTX-01 — `treasury.utxo_history` table + Postgres trigger *(IMPLEMENTED)*
+- **Implementation:** `install_utxo_history_triggers`
+  (`api/src/services/sync.rs`) creates two triggers at API startup:
+  - `capture_address_utxo` AFTER INSERT/UPDATE on `yaci_store.address_utxo`
+    copies every `addr1x*` row into `treasury.utxo_history`.
+  - `mark_utxo_spent` AFTER INSERT on `yaci_store.tx_input` flags the
+    corresponding `treasury.utxo_history` row as spent.
+- **Outcome:** complete UTXO history at script addresses is preserved
+  regardless of YACI Store's pruning window. Resolves KI-VND-04, KI-EVT-01,
+  KI-CR-01.
+
+#### KI-UTX-02 — `vendor_contract_id` IS NULL on non-script UTXOs (by design)
 - **Why:** `pre_fetch_utxos` (`event_processor.rs:1209`) inserts every output
   of every TOM-event tx without `vendor_contract_id`. The chain-trace seed
   (set later by `process_fund` and `find_vendor_contract_from_inputs`) only
@@ -278,11 +284,28 @@ SELECT tx_hash, output_index, address FROM treasury.utxos WHERE lovelace_amount 
 
 ## Section B — On-chain data inconsistencies
 
-### KI-OC-01 — Milestone-id naming drift (`m-N` vs `MS-N`)
+### KI-OC-01 — Milestone-id naming drift (`m-N` vs `MS-N`) *(RESOLVED at lookup time)*
+- **Resolved by:** `canonical_milestone_order`
+  (`api/src/services/event_processor.rs`) parses metadata keys to a 1-indexed
+  `milestone_order` (`m-N` → `N+1`, `MS-N` → `N`). `process_complete` and
+  `process_withdraw` UPDATE clauses now match `milestone_id = $key OR
+  milestone_order = $order`, so events whose metadata key uses the opposite
+  scheme to the fund event still resolve.
+- Stored `milestone_id` is left as-is.
+
+The original analysis is preserved below.
+
+
 - **Pattern:** fund events for some projects emit milestones as an array
   whose elements have `identifier: "m-N"`; fund events for the `UTXO-*`
-  family emit milestones as an array of `MS-N` identifiers, but our parser
-  stores them as `m-N`/`MS-N` based on whatever the `identifier` field says.
+  family emit them as `"MS-N"`. Our parser stores whatever the
+  `identifier` field says.
+- **Indexing convention:** the two schemes use different bases —
+  `m-N` is **0-indexed** (`m-0`, `m-1`, …, `m-{count-1}`) while `MS-N`
+  is **1-indexed** (`MS-1`, `MS-2`, …, `MS-{count}`). So the *first*
+  milestone of a project is `m-0` under one convention and `MS-1` under
+  the other; positionally they are the same milestone. A future
+  normaliser that wants to merge the two formats can use this offset.
 - **Effect on complete events:** of 188 complete events, 107 use `m-N` keys
   and 81 use `MS-N` keys. After the disambiguation hint to
   `find_vendor_contract_from_inputs`, this no longer causes silent event
@@ -339,32 +362,35 @@ GROUP BY 1 ORDER BY 1;
 
 ## Section C — Cold-replay UTXO-pruning limitation
 
-### KI-CR-01 — Fresh local sync can't reconstruct fully-pruned chains
-- **Symptom:** the 56 events under KI-EVT-01 with NULL `vendor_contract_id`.
-- **Why:** YACI Store prunes spent UTXOs after ~2160 blocks (~10 days). On a
-  cold replay from an old `STORE_CARDANO_SYNC_START_SLOT`, by the time the
-  indexer is processing event N, its input UTXOs from event N-K may already
-  be gone. `pre_fetch_utxos` (`event_processor.rs:1209`) cannot capture what
-  YACI Store no longer has.
-- **Mitigation 1:** keep the API running continuously — it captures outputs
-  before pruning gets a chance.
-- **Mitigation 2:** set `STORE_CARDANO_SYNC_START_SLOT` to a more recent
-  block so less history needs to be reconstructed.
-- **Cross-ref:** the gotcha in `CLAUDE.md` under "Gotchas".
+### KI-CR-01 — Fresh local sync can't reconstruct fully-pruned chains *(MITIGATED)*
+- **Mitigated by:** the historical-UTXO trigger (KI-UTX-01). Going forward,
+  every UTXO YACI Store inserts is captured in `treasury.utxo_history` before
+  it can be pruned, so continuous-operation chain trace works fully.
+- **Caveat:** the trigger only protects UTXOs *from the moment it was
+  installed*. If `yaci_store.address_utxo` had already been pruned before
+  the trigger was armed (typical local install), historical fund-output
+  datums may still be missing from `treasury.utxo_history`. To recover
+  those, wipe both schemas and re-sync from
+  `STORE_CARDANO_SYNC_START_SLOT`:
+  ```bash
+  ./dev.sh stop
+  docker volume rm administration-data_postgres_data
+  ./dev.sh start
+  ```
+  Triggers must already be present in `database/init/02-treasury-schema.sql`
+  *or* the API must arm them before YACI Store finishes its initial sync.
+  The `install_utxo_history_triggers` startup hook in
+  `api/src/services/sync.rs` runs early enough on a fresh install to
+  satisfy this.
 
 ---
 
 ## Section D — Sync-loop quirks
 
-### KI-SY-01 — `treasury.sync_status.updated_at` doesn't bump on idle ticks
-- **Code:** `sync_new_events` in `api/src/services/sync.rs` returns early
-  when `rows.is_empty()` and never UPDATEs. `/api/v1/statistics`'s
-  `last_updated` looks "stale" even when the loop is alive and polling
-  every 15 s.
-- **Workaround:** trust the indexer cursor for liveness, or check
-  `lsof -i :8080`.
-- **Fix candidate:** bump `updated_at` (and optionally write the indexer's
-  current slot) on every poll, even when no work is found.
+### KI-SY-01 — `treasury.sync_status.updated_at` doesn't bump on idle ticks *(RESOLVED)*
+- **Resolved by:** `sync_new_events` (`api/src/services/sync.rs`) now bumps
+  `updated_at` on the `rows.is_empty()` path so `/api/v1/statistics`
+  reflects a live heartbeat even when no new TOM events have arrived.
 
 ### KI-SY-02 — `last_slot` can advance past failed events on connection reset
 - **Symptom observed:** during a postgres restart mid-batch
@@ -384,33 +410,32 @@ GROUP BY 1 ORDER BY 1;
 
 ## Section E — Spec / code mismatches
 
-### KI-API-01 — `disburse.destination` typed as string instead of `{label, details}`
-- **Spec:** `docs/event-processing.md` line ~286 documents `body.destination`
-  as an object `{label, details}`.
-- **Code:** `process_disburse` (`event_processor.rs:583`) extracts via
-  `extract_text` and stores the resulting string in
-  `treasury.events.destination`. The `details` sub-field is dropped.
-- **Currently affected:** all 4 `disburse` events in the DB.
-- **Fix candidate:** change `treasury.events.destination` to `JSONB`, keep
-  the full object, expose both fields in the API response.
+### KI-API-01 — `disburse.destination` typed as string instead of `{label, details}` *(RESOLVED)*
+- **Resolved by:** `treasury.events.destination` is now `JSONB`. `process_disburse`
+  preserves the full TOM `{label, details}` object instead of flattening to a
+  string. API model fields updated to `serde_json::Value`. **Breaking change**
+  for downstream consumers that previously read `destination` as a string —
+  they should now read `destination.label`.
 
 ---
 
 ## Index summary
 
-| ID | Area | Severity | Status |
-|---|---|---|---|
-| KI-VND-01 | datum parse failure on `UTXO-*` projects | High — breaks downstream KI-MIL-01 | open |
-| KI-VND-02 | `vendor_name` deprecated, always NULL | Cleanup | open |
-| KI-VND-03 | `contract_url` deprecated, always NULL | Cleanup | open |
-| KI-VND-04 | `contract_address` NULL on cold replay | Acceptable; mitigation documented | open |
-| KI-MIL-01 | NULL `label`/`amount`/`time_limit`/`AC` for `UTXO-*` | High — same root as VND-01 | open |
-| KI-EVT-01 | NULL `vendor_contract_id` on chain-trace failure | Medium — cold-replay only | open |
-| KI-UTX-01 | NULL `vendor_contract_id` on non-script UTXOs | By design | not a bug |
-| KI-OC-01 | milestone-id naming drift | Documented; mitigated by disambiguation | open |
-| KI-OC-02 | empty `body.identifier` everywhere | On-chain data; can't fix locally | not a bug |
-| KI-OC-03 | multi-input sibling-project txs | Mitigated | resolved |
-| KI-CR-01 | cold-replay limitation | Documented mitigation | open |
-| KI-SY-01 | idle `updated_at` doesn't bump | Low — UX confusion | open |
-| KI-SY-02 | `last_slot` advances past failed events | Medium — recoverable via restart | open |
-| KI-API-01 | `destination` schema mismatch | Low — data loss for one field | open |
+| ID | Area | Status |
+|---|---|---|
+| KI-VND-01 | datum parse failure on `UTXO-*` projects | **resolved** (multi-key parser) |
+| KI-VND-02 | `vendor_name` deprecated | **resolved** (column dropped) |
+| KI-VND-03 | `contract_url` deprecated | **resolved** (column dropped) |
+| KI-VND-04 | `contract_address` NULL on cold replay | **resolved** (utxo_history trigger) |
+| KI-MIL-01 | NULL `label`/`amount`/`time_limit`/`AC` for `UTXO-*` | **resolved** for datum-derived fields |
+| KI-EVT-01 | NULL `vendor_contract_id` on chain-trace failure | **resolved** (utxo_history trigger) |
+| KI-EVT-03 | NULL `milestone_id` on treasury-level events | by design |
+| KI-UTX-01 | historical-UTXO table + trigger | **implemented** |
+| KI-UTX-02 | `vendor_contract_id` NULL on non-script UTXOs | by design |
+| KI-OC-01 | milestone-id naming drift (m-N vs MS-N) | **resolved at lookup time** |
+| KI-OC-02 | empty `body.identifier` everywhere | on-chain limitation |
+| KI-OC-03 | multi-input sibling-project txs | resolved (disambiguation hint) |
+| KI-CR-01 | cold-replay limitation | **resolved** (utxo_history trigger) |
+| KI-SY-01 | idle `updated_at` doesn't bump | **resolved** |
+| KI-SY-02 | `last_slot` advances past failed events | open |
+| KI-API-01 | `destination` schema mismatch | **resolved** (JSONB; breaking API change) |

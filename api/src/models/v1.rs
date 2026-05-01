@@ -670,8 +670,8 @@ pub struct EventResponse {
     pub amount_lovelace: Option<i64>,
     /// Reason (for pause/cancel/modify events)
     pub reason: Option<String>,
-    /// Destination (for disburse events)
-    pub destination: Option<String>,
+    /// Destination (for disburse events) — TOM `{label, details}` object preserved as-is.
+    pub destination: Option<serde_json::Value>,
     /// Treasury context
     pub treasury: Option<EventTreasuryContext>,
     /// Project context
@@ -724,7 +724,7 @@ pub struct EventWithContextRow {
     pub event_type: String,
     pub amount_lovelace: Option<i64>,
     pub reason: Option<String>,
-    pub destination: Option<String>,
+    pub destination: Option<serde_json::Value>,
     pub metadata: Option<serde_json::Value>,
     pub created_at: Option<DateTime<Utc>>,
     pub treasury_instance: Option<String>,
@@ -933,7 +933,7 @@ pub struct VendorContractsQuery {
     pub limit: u32,
     /// Filter by status (active/paused/completed/cancelled)
     pub status: Option<String>,
-    /// Search in project_id, project_name, description, vendor_name
+    /// Search in project_id, project_name, description
     pub search: Option<String>,
     /// Sort field (fund_time, project_id, project_name)
     pub sort: Option<String>,

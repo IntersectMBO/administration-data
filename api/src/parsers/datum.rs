@@ -38,7 +38,21 @@ pub struct ParsedMilestoneDatum {
     pub paused: bool,
 }
 
-/// Parse a vendor contract datum from CBOR hex string
+/// Parse a vendor contract datum from CBOR hex string.
+///
+/// Two on-chain vendor-info shapes are supported:
+///
+/// 1. Single-key (`m-N` projects):
+///    `Constr(0, [Constr(0, [bytes(28)]), [milestones]])`
+///
+/// 2. Multi-key (`UTXO-*` projects, e.g. `UTXO-EC-0002-25-*`):
+///    `Constr(0, [Constr(1, [(Constr(0, [bytes(28)]), Constr(N, [bytes(28)]))]), [milestones]])`
+///    — vendor info wraps a tuple of two parties (different signature
+///    types). We walk the subtree and collect every 28-byte BoundedBytes
+///    (Cardano key-hash size, Blake2b-224), joining them with `,` for
+///    storage in the single `vendor_payment_key_hash` column.
+///
+/// The milestones array structure is identical between the two formats.
 pub fn parse_vendor_contract_datum(cbor_hex: &str) -> anyhow::Result<ParsedVendorDatum> {
     let bytes = hex::decode(cbor_hex).context("invalid hex in datum")?;
     let datum: PlutusData =
@@ -53,12 +67,14 @@ pub fn parse_vendor_contract_datum(cbor_hex: &str) -> anyhow::Result<ParsedVendo
         ));
     }
 
-    // Field 0: Constr(0, [ByteString(vendor_payment_key_hash)])
-    let vendor_fields = expect_constr(&top_fields[0], 0, "vendor info")?;
-    if vendor_fields.is_empty() {
-        return Err(anyhow!("vendor info has no fields"));
+    // Field 0: vendor info. Walk the subtree and collect every 28-byte
+    // BoundedBytes — handles both single-key and multi-key shapes uniformly.
+    let mut hashes: Vec<String> = Vec::new();
+    collect_key_hashes(&top_fields[0], &mut hashes);
+    if hashes.is_empty() {
+        return Err(anyhow!("no 28-byte key hash found in vendor info"));
     }
-    let vendor_payment_key_hash = expect_bytes(&vendor_fields[0], "vendor_payment_key_hash")?;
+    let vendor_payment_key_hash = hashes.join(",");
 
     // Field 1: Array of milestone Constrs
     let milestone_data_list = expect_array(&top_fields[1], "milestones array")?;
@@ -152,6 +168,29 @@ fn extract_lovelace_from_value(datum: &PlutusData) -> anyhow::Result<i64> {
 // Helpers
 // ============================================================================
 
+/// Walk a Plutus datum subtree and collect every 28-byte BoundedBytes
+/// (Cardano key-hash size, Blake2b-224) it contains, in pre-order.
+fn collect_key_hashes(datum: &PlutusData, acc: &mut Vec<String>) {
+    match datum {
+        PlutusData::BoundedBytes(b) => {
+            if b.len() == 28 {
+                acc.push(hex::encode(b.as_slice()));
+            }
+        }
+        PlutusData::Constr(c) => {
+            for f in &c.fields {
+                collect_key_hashes(f, acc);
+            }
+        }
+        PlutusData::Array(arr) => {
+            for x in arr {
+                collect_key_hashes(x, acc);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn expect_constr<'a>(
     datum: &'a PlutusData,
     expected_tag_offset: u64,
@@ -192,6 +231,7 @@ fn expect_array<'a>(
     }
 }
 
+#[allow(dead_code)]
 fn expect_bytes(datum: &PlutusData, context: &str) -> anyhow::Result<String> {
     match datum {
         PlutusData::BoundedBytes(bytes) => Ok(hex::encode(bytes.as_slice())),

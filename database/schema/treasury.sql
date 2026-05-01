@@ -33,9 +33,7 @@ CREATE TABLE IF NOT EXISTS treasury.vendor_contracts (
     other_identifiers TEXT[],                    -- Related IDs from otherIdentifiers array
     project_name TEXT,                           -- Label from fund event
     description TEXT,                            -- Project description (joined if array)
-    vendor_name TEXT,                            -- DEPRECATED: always null, TOM spec has no vendor.name
     vendor_address TEXT,                         -- Payment destination (vendor.label in metadata)
-    contract_url TEXT,                           -- DEPRECATED: always null, no on-chain data available
     contract_address TEXT,                       -- PSSC script address (from fund tx output)
     vendor_payment_key_hash VARCHAR(56),
     fund_tx_hash VARCHAR(64) NOT NULL,           -- Fund transaction
@@ -100,13 +98,13 @@ CREATE TABLE IF NOT EXISTS treasury.events (
     milestone_id INT REFERENCES treasury.milestones(id),
     amount_lovelace BIGINT,                      -- Amount involved
     reason TEXT,                                 -- Justification (pause/cancel/modify)
-    destination TEXT,                            -- Destination label (disburse)
+    destination JSONB,                           -- Destination object {label, details} (disburse)
     metadata JSONB,                              -- Original TOM metadata body
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- UTXOs - Track UTXOs at treasury-related addresses
-CREATE TABLE IF NOT EXISTS treasury.utxos (
+CREATE TABLE IF NOT EXISTS treasury.utxo_history (
     id SERIAL PRIMARY KEY,
     tx_hash VARCHAR(64) NOT NULL,                -- Transaction hash
     output_index SMALLINT NOT NULL,              -- Output index
@@ -174,11 +172,11 @@ CREATE INDEX IF NOT EXISTS idx_event_slot ON treasury.events(slot DESC);
 CREATE INDEX IF NOT EXISTS idx_event_block_time ON treasury.events(block_time DESC);
 
 -- UTXOs
-CREATE INDEX IF NOT EXISTS idx_utxo_address ON treasury.utxos(address);
-CREATE INDEX IF NOT EXISTS idx_utxo_vendor ON treasury.utxos(vendor_contract_id);
-CREATE INDEX IF NOT EXISTS idx_utxo_unspent ON treasury.utxos(address) WHERE NOT spent;
-CREATE INDEX IF NOT EXISTS idx_utxo_slot ON treasury.utxos(slot DESC);
-CREATE INDEX IF NOT EXISTS idx_utxo_vendor_unspent ON treasury.utxos(vendor_contract_id) WHERE NOT spent;
+CREATE INDEX IF NOT EXISTS idx_utxo_history_address ON treasury.utxo_history(address);
+CREATE INDEX IF NOT EXISTS idx_utxo_history_vendor ON treasury.utxo_history(vendor_contract_id);
+CREATE INDEX IF NOT EXISTS idx_utxo_history_unspent ON treasury.utxo_history(address) WHERE NOT spent;
+CREATE INDEX IF NOT EXISTS idx_utxo_history_slot ON treasury.utxo_history(slot DESC);
+CREATE INDEX IF NOT EXISTS idx_utxo_history_vendor_unspent ON treasury.utxo_history(vendor_contract_id) WHERE NOT spent;
 
 -- Full-text search across project fields
 CREATE INDEX IF NOT EXISTS idx_vendor_fulltext ON treasury.vendor_contracts
@@ -260,7 +258,7 @@ SELECT
 FROM treasury.vendor_contracts vc
 LEFT JOIN treasury.treasury_contracts tc ON tc.id = vc.treasury_id
 LEFT JOIN treasury.milestones m ON m.vendor_contract_id = vc.id
-LEFT JOIN treasury.utxos u ON u.vendor_contract_id = vc.id
+LEFT JOIN treasury.utxo_history u ON u.vendor_contract_id = vc.id
 GROUP BY vc.id, tc.contract_instance;
 
 -- Milestone timeline with vendor context
@@ -338,12 +336,12 @@ SELECT
     COUNT(DISTINCT vc.id) FILTER (WHERE vc.status = 'cancelled') as cancelled_contracts,
     COALESCE((
         SELECT SUM(u.lovelace_amount)
-        FROM treasury.utxos u
+        FROM treasury.utxo_history u
         WHERE u.address = tc.contract_address AND NOT u.spent
     ), 0)::BIGINT as treasury_balance,
     COALESCE((
         SELECT COUNT(*)
-        FROM treasury.utxos u
+        FROM treasury.utxo_history u
         WHERE u.address = tc.contract_address AND NOT u.spent
     ), 0) as utxo_count,
     (SELECT COUNT(*) FROM treasury.events WHERE treasury_id = tc.id) as total_events,
@@ -397,13 +395,13 @@ SELECT
     -- Treasury balance (unspent UTXOs at treasury address)
     COALESCE((
         SELECT SUM(u.lovelace_amount)
-        FROM treasury.utxos u
+        FROM treasury.utxo_history u
         WHERE u.address = tc.contract_address AND NOT u.spent
     ), 0)::BIGINT as treasury_balance_lovelace,
     -- Project-level balance (sum of project UTXOs)
     COALESCE((
         SELECT SUM(u2.lovelace_amount)
-        FROM treasury.utxos u2
+        FROM treasury.utxo_history u2
         JOIN treasury.vendor_contracts vc2 ON vc2.id = u2.vendor_contract_id
         WHERE vc2.treasury_id = tc.id AND NOT u2.spent AND u2.address LIKE 'addr1x%'
     ), 0)::BIGINT as project_balance_lovelace,

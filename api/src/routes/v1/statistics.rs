@@ -204,7 +204,7 @@ async fn get_financial_stats(pool: &PgPool) -> Result<FinancialStats, StatusCode
 
     // Get current balance (unspent UTXOs)
     let (current_balance,): (Option<i64>,) = sqlx::query_as(
-        "SELECT COALESCE(SUM(lovelace_amount), 0)::BIGINT FROM treasury.utxos WHERE NOT spent"
+        "SELECT COALESCE(SUM(lovelace_amount), 0)::BIGINT FROM treasury.utxo_history WHERE NOT spent"
     )
     .fetch_one(pool)
     .await

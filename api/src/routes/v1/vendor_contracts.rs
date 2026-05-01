@@ -440,7 +440,7 @@ pub async fn get_vendor_contract_utxos(
             u.lovelace_amount,
             u.slot,
             u.block_number
-        FROM treasury.utxos u
+        FROM treasury.utxo_history u
         JOIN treasury.vendor_contracts vc ON vc.id = u.vendor_contract_id
         WHERE vc.project_id = $1 AND NOT u.spent
         ORDER BY u.slot DESC
