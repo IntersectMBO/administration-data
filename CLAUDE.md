@@ -161,6 +161,7 @@ Never modify `yaci-store.jar` or YACI Store internals. Primary network: Mainnet 
 - **Port 5433**: PostgreSQL is on host port 5433, not 5432.
 - **`.env` not committed**: copy `.env.example` and configure before first run.
 - **UTXO pruning**: YACI Store prunes spent UTXOs — historical UTXO data may not be available.
+- **Cold replay vs continuous operation**: The milestone-event chain trace (`find_vendor_contract_from_inputs`) needs UTXO history to link withdraw/complete/pause/resume to a vendor contract. A continuously-running deployment captures each output before YACI Store prunes it; a fresh local sync from an old `STORE_CARDANO_SYNC_START_SLOT` cannot reconstruct chains whose inputs were pruned before sync caught up. Result: a fraction of historical milestone events will land in `treasury.events` with `vendor_contract_id = NULL` and won't update `treasury.milestones` flags. Mitigations: keep the API running, or pick a more recent start slot.
 - **Large JAR**: `indexer/yaci-store.jar` is ~108MB and committed to the repo. Don't regenerate unnecessarily.
 - **Inline datums**: `store.script.enabled=true` in YACI Store config enables milestone datum data (amounts, time limits, pause flags). Requires full re-sync after enabling.
 - **Milestone archiving**: Filter `WHERE NOT archived` for current milestones. Archived rows are historical versions.

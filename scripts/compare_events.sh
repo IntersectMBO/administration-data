@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 LOCAL="http://localhost:8080/api/v1/events"
 DEPLOYED="https://administration.info.intersectmbo.org/api/v1/events"
 LIMIT=100
@@ -33,7 +35,7 @@ fetch_all "$DEPLOYED" "$DEPLOYED_FILE"
 sort "$LOCAL_FILE" > "${LOCAL_FILE}.sorted"
 sort "$DEPLOYED_FILE" > "${DEPLOYED_FILE}.sorted"
 
-OUTPUT="diverging_events.csv"
+OUTPUT="${SCRIPT_DIR}/diverging_events.csv"
 echo "tx_hash,event_type,slot,project_id,source" > "$OUTPUT"
 
 # Lines only in local

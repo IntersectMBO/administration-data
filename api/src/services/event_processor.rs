@@ -492,12 +492,14 @@ impl EventProcessor {
     async fn process_complete(&self, event: &RawTomEvent, body: &Value) -> anyhow::Result<()> {
         let event_body = body.get("body").unwrap_or(body);
 
-        // First try to get project_id from metadata (older format)
         let project_id_from_meta = event_body.get("identifier")
             .and_then(|i| i.as_str())
             .filter(|s| !s.is_empty());
 
-        // Get vendor contract ID - either from metadata or by tracing tx chain
+        // Hints used to disambiguate when chain tracing finds multiple candidate
+        // vendor contracts (e.g. the tx pulls fee inputs from a sibling project).
+        let milestone_hints = collect_milestone_id_hints(event_body);
+
         let vendor_contract_id: Option<i32> = if let Some(pid) = project_id_from_meta {
             sqlx::query_scalar(
                 "SELECT id FROM treasury.vendor_contracts WHERE project_id = $1"
@@ -506,23 +508,17 @@ impl EventProcessor {
             .fetch_optional(&self.pool)
             .await?
         } else {
-            // Trace back through transaction chain to find the project
-            self.find_vendor_contract_from_inputs(&event.tx_hash).await?
+            self.find_vendor_contract_from_inputs(&event.tx_hash, &milestone_hints).await?
         };
 
-        let vendor_contract_id = match vendor_contract_id {
-            Some(id) => id,
-            None => {
-                tracing::warn!("Could not find vendor contract for complete event {}", event.tx_hash);
-                self.insert_event_full(event, "complete", None, None, None, None, &None, &None, body).await?;
-                return Ok(());
-            }
-        };
+        if vendor_contract_id.is_none() {
+            tracing::warn!("Could not find vendor contract for complete event {}", event.tx_hash);
+        }
 
-        // Process completed milestones
-        if let Some(milestones) = event_body.get("milestones") {
-            // Milestones can be an object keyed by milestone_id
-            if let Some(obj) = milestones.as_object() {
+        let mut matched_milestone_id: Option<i32> = None;
+
+        if let Some(vc_id) = vendor_contract_id {
+            if let Some(obj) = event_body.get("milestones").and_then(|m| m.as_object()) {
                 for (milestone_id, milestone_data) in obj {
                     let description = extract_text_from_value(Some(milestone_data.get("description").unwrap_or(&Value::Null)));
                     let evidence = milestone_data.get("evidence").cloned();
@@ -543,36 +539,42 @@ impl EventProcessor {
                     .bind(event.block_time)
                     .bind(&description)
                     .bind(&evidence)
-                    .bind(vendor_contract_id)
+                    .bind(vc_id)
                     .bind(milestone_id)
                     .fetch_optional(&self.pool)
                     .await?;
 
-                    if let Some(mid) = db_milestone_id {
-                        self.insert_event_full(event, "complete", None, Some(vendor_contract_id), Some(mid), None, &None, &None, body).await?;
+                    if matched_milestone_id.is_none() {
+                        matched_milestone_id = db_milestone_id;
                     }
+                }
+            }
+
+            if let Some(milestone_id) = event_body.get("milestone").and_then(|m| m.as_str()) {
+                let db_milestone_id: Option<i32> = sqlx::query_scalar(
+                    r#"
+                    UPDATE treasury.milestones
+                    SET evidence_provided = TRUE,
+                        complete_tx_hash = $1,
+                        complete_time = $2
+                    WHERE vendor_contract_id = $3 AND milestone_id = $4 AND NOT archived
+                    RETURNING id
+                    "#
+                )
+                .bind(&event.tx_hash)
+                .bind(event.block_time)
+                .bind(vc_id)
+                .bind(milestone_id)
+                .fetch_optional(&self.pool)
+                .await?;
+
+                if matched_milestone_id.is_none() {
+                    matched_milestone_id = db_milestone_id;
                 }
             }
         }
 
-        // Also check for single milestone field (older format)
-        if let Some(milestone_id) = event_body.get("milestone").and_then(|m| m.as_str()) {
-            sqlx::query(
-                r#"
-                UPDATE treasury.milestones
-                SET evidence_provided = TRUE,
-                    complete_tx_hash = $1,
-                    complete_time = $2
-                WHERE vendor_contract_id = $3 AND milestone_id = $4 AND NOT archived
-                "#
-            )
-            .bind(&event.tx_hash)
-            .bind(event.block_time)
-            .bind(vendor_contract_id)
-            .bind(milestone_id)
-            .execute(&self.pool)
-            .await?;
-        }
+        self.insert_event_full(event, "complete", None, vendor_contract_id, matched_milestone_id, None, &None, &None, body).await?;
 
         Ok(())
     }
@@ -607,7 +609,8 @@ impl EventProcessor {
             .and_then(|i| i.as_str())
             .filter(|s| !s.is_empty());
 
-        // Get vendor contract ID - either from metadata or by tracing tx chain
+        let milestone_hints = collect_milestone_id_hints(event_body);
+
         let vendor_contract_id: Option<i32> = if let Some(pid) = project_id_from_meta {
             sqlx::query_scalar(
                 "SELECT id FROM treasury.vendor_contracts WHERE project_id = $1"
@@ -616,38 +619,42 @@ impl EventProcessor {
             .fetch_optional(&self.pool)
             .await?
         } else {
-            self.find_vendor_contract_from_inputs(&event.tx_hash).await?
+            self.find_vendor_contract_from_inputs(&event.tx_hash, &milestone_hints).await?
         };
 
-        if let Some(vc_id) = vendor_contract_id {
-            // Get withdraw amount from tx outputs (non-script addresses)
-            let withdraw_amount: Option<i64> = sqlx::query_scalar(
-                "SELECT COALESCE(SUM(lovelace_amount)::bigint, 0) FROM yaci_store.address_utxo WHERE tx_hash = $1 AND owner_addr NOT LIKE 'addr1x%'"
-            )
-            .bind(&event.tx_hash)
-            .fetch_optional(&self.pool)
-            .await?;
+        if vendor_contract_id.is_none() {
+            tracing::warn!("Could not find vendor contract for withdraw event {}", event.tx_hash);
+        }
 
-            // Fallback to treasury.utxos if yaci_store returned 0 (pruned UTXOs)
-            let withdraw_amount = match withdraw_amount {
-                Some(amt) if amt > 0 => Some(amt),
-                _ => {
-                    let fallback: Option<i64> = sqlx::query_scalar(
-                        "SELECT COALESCE(SUM(lovelace_amount)::bigint, 0) FROM treasury.utxos WHERE tx_hash = $1 AND address NOT LIKE 'addr1x%'"
-                    )
-                    .bind(&event.tx_hash)
-                    .fetch_optional(&self.pool)
-                    .await?;
-                    match fallback {
-                        Some(a) if a > 0 => Some(a),
-                        _ => withdraw_amount,
-                    }
+        // Withdraw amount comes from tx outputs (non-script addresses) and is independent of vc lookup.
+        let withdraw_amount: Option<i64> = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(lovelace_amount)::bigint, 0) FROM yaci_store.address_utxo WHERE tx_hash = $1 AND owner_addr NOT LIKE 'addr1x%'"
+        )
+        .bind(&event.tx_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let withdraw_amount = match withdraw_amount {
+            Some(amt) if amt > 0 => Some(amt),
+            _ => {
+                let fallback: Option<i64> = sqlx::query_scalar(
+                    "SELECT COALESCE(SUM(lovelace_amount)::bigint, 0) FROM treasury.utxos WHERE tx_hash = $1 AND address NOT LIKE 'addr1x%'"
+                )
+                .bind(&event.tx_hash)
+                .fetch_optional(&self.pool)
+                .await?;
+                match fallback {
+                    Some(a) if a > 0 => Some(a),
+                    _ => withdraw_amount,
                 }
-            };
+            }
+        };
 
-            // Handle milestones object (plural, keyed by ID) — spec format
-            if let Some(milestones) = event_body.get("milestones").and_then(|m| m.as_object()) {
-                for (milestone_id, _milestone_data) in milestones {
+        let mut matched_milestone_id: Option<i32> = None;
+
+        if let Some(vc_id) = vendor_contract_id {
+            if let Some(obj) = event_body.get("milestones").and_then(|m| m.as_object()) {
+                for (milestone_id, _milestone_data) in obj {
                     let db_milestone_id: Option<i32> = sqlx::query_scalar(
                         r#"
                         UPDATE treasury.milestones
@@ -667,12 +674,13 @@ impl EventProcessor {
                     .fetch_optional(&self.pool)
                     .await?;
 
-                    if let Some(mid) = db_milestone_id {
-                        self.insert_event_full(event, "withdraw", None, Some(vc_id), Some(mid), withdraw_amount, &None, &None, body).await?;
+                    if matched_milestone_id.is_none() {
+                        matched_milestone_id = db_milestone_id;
                     }
                 }
-            } else if let Some(milestone_id) = event_body.get("milestone").and_then(|m| m.as_str()) {
-                // Handle singular milestone (legacy format)
+            }
+
+            if let Some(milestone_id) = event_body.get("milestone").and_then(|m| m.as_str()) {
                 let db_milestone_id: Option<i32> = sqlx::query_scalar(
                     r#"
                     UPDATE treasury.milestones
@@ -692,14 +700,13 @@ impl EventProcessor {
                 .fetch_optional(&self.pool)
                 .await?;
 
-                self.insert_event_full(event, "withdraw", None, Some(vc_id), db_milestone_id, withdraw_amount, &None, &None, body).await?;
-            } else {
-                self.insert_event_full(event, "withdraw", None, Some(vc_id), None, withdraw_amount, &None, &None, body).await?;
+                if matched_milestone_id.is_none() {
+                    matched_milestone_id = db_milestone_id;
+                }
             }
-        } else {
-            tracing::warn!("Could not find vendor contract for withdraw event {}", event.tx_hash);
-            self.insert_event_full(event, "withdraw", None, None, None, None, &None, &None, body).await?;
         }
+
+        self.insert_event_full(event, "withdraw", None, vendor_contract_id, matched_milestone_id, withdraw_amount, &None, &None, body).await?;
 
         Ok(())
     }
@@ -723,7 +730,7 @@ impl EventProcessor {
             .await?
         } else {
             // Find via tx chain first, then update
-            if let Some(vc_id) = self.find_vendor_contract_from_inputs(&event.tx_hash).await? {
+            if let Some(vc_id) = self.find_vendor_contract_from_inputs(&event.tx_hash, &[]).await? {
                 sqlx::query("UPDATE treasury.vendor_contracts SET status = 'paused' WHERE id = $1")
                     .bind(vc_id)
                     .execute(&self.pool)
@@ -764,7 +771,7 @@ impl EventProcessor {
             .fetch_optional(&self.pool)
             .await?
         } else {
-            if let Some(vc_id) = self.find_vendor_contract_from_inputs(&event.tx_hash).await? {
+            if let Some(vc_id) = self.find_vendor_contract_from_inputs(&event.tx_hash, &[]).await? {
                 sqlx::query("UPDATE treasury.vendor_contracts SET status = 'active' WHERE id = $1")
                     .bind(vc_id)
                     .execute(&self.pool)
@@ -806,7 +813,7 @@ impl EventProcessor {
             .fetch_optional(&self.pool)
             .await?
         } else {
-            self.find_vendor_contract_from_inputs(&event.tx_hash).await?
+            self.find_vendor_contract_from_inputs(&event.tx_hash, &[]).await?
         };
 
         if let Some(vc_id) = vendor_contract_id {
@@ -940,7 +947,7 @@ impl EventProcessor {
             .fetch_optional(&self.pool)
             .await?
         } else {
-            if let Some(vc_id) = self.find_vendor_contract_from_inputs(&event.tx_hash).await? {
+            if let Some(vc_id) = self.find_vendor_contract_from_inputs(&event.tx_hash, &[]).await? {
                 sqlx::query("UPDATE treasury.vendor_contracts SET status = 'cancelled' WHERE id = $1")
                     .bind(vc_id)
                     .execute(&self.pool)
@@ -1037,7 +1044,11 @@ impl EventProcessor {
     /// When a fund event is processed, its output UTXOs are recorded with the vendor_contract_id.
     /// Subsequent events (complete/withdraw/etc) spend those UTXOs, so we can find the project
     /// by looking at which tracked UTXOs are being spent as inputs.
-    async fn find_vendor_contract_from_inputs(&self, tx_hash: &str) -> anyhow::Result<Option<i32>> {
+    async fn find_vendor_contract_from_inputs(
+        &self,
+        tx_hash: &str,
+        milestone_id_hints: &[String],
+    ) -> anyhow::Result<Option<i32>> {
         // Get the inputs to this transaction from the transaction table's inputs JSONB.
         // We use this instead of yaci_store.tx_input because tx_input is pruned
         // (only retains ~44K recent slots), while transaction.inputs is permanent.
@@ -1057,7 +1068,10 @@ impl EventProcessor {
             _ => vec![],
         };
 
-        // Look up each input in our tracked UTXOs
+        // Collect every input that maps to a tracked vendor contract. A single tx can
+        // include inputs from multiple project chains (e.g. fee/collateral from another
+        // contract), so we don't want to commit to the first match blindly.
+        let mut candidates: Vec<(String, i16, i32)> = Vec::new();
         for (input_tx_hash, input_output_index) in &inputs {
             let vendor_contract_id: Option<i32> = sqlx::query_scalar(
                 r#"
@@ -1072,93 +1086,121 @@ impl EventProcessor {
             .await?;
 
             if let Some(vc_id) = vendor_contract_id {
-                // Get the input UTXO's script address as a fallback for pruned outputs
-                let input_address: Option<String> = sqlx::query_scalar(
-                    "SELECT address FROM treasury.utxos WHERE tx_hash = $1 AND output_index = $2"
-                )
-                .bind(input_tx_hash)
-                .bind(input_output_index)
-                .fetch_optional(&self.pool)
-                .await?
-                .flatten();
-
-                // Mark this UTXO as spent and record the new outputs
-                sqlx::query(
-                    r#"
-                    UPDATE treasury.utxos
-                    SET spent = true, spent_tx_hash = $1
-                    WHERE tx_hash = $2 AND output_index = $3
-                    "#
-                )
-                .bind(tx_hash)
-                .bind(input_tx_hash)
-                .bind(input_output_index)
-                .execute(&self.pool)
-                .await?;
-
-                // Record the outputs of this transaction with the same vendor_contract_id
-                let outputs: Option<serde_json::Value> = sqlx::query_scalar(
-                    "SELECT outputs::jsonb FROM yaci_store.transaction WHERE tx_hash = $1"
-                )
-                .bind(tx_hash)
-                .fetch_optional(&self.pool)
-                .await?;
-
-                if let Some(serde_json::Value::Array(output_arr)) = outputs {
-                    for output in output_arr {
-                        if let (Some(out_tx_hash), Some(output_index)) = (
-                            output.get("tx_hash").and_then(|h| h.as_str()),
-                            output.get("output_index").and_then(|i| i.as_i64())
-                        ) {
-                            // Look up address, amount, and inline datum (with fallback for pruned UTXOs)
-                            let (address, lovelace_amount, out_datum) = {
-                                let (addr, amt, datum) = self.lookup_utxo(out_tx_hash, output_index as i16).await?;
-                                if addr.is_some() {
-                                    (addr, amt, datum)
-                                } else {
-                                    // Third-level fallback: use the input's script address
-                                    (input_address.clone(), None, None)
-                                }
-                            };
-
-                            // Only track UTXOs at script addresses (addr1x) — skip change outputs
-                            if !address.as_ref().map_or(false, |a| a.starts_with("addr1x")) {
-                                continue;
-                            }
-
-                            let address_type = Some("vendor_contract");
-
-                            sqlx::query(
-                                r#"
-                                INSERT INTO treasury.utxos (tx_hash, output_index, vendor_contract_id, address, address_type, lovelace_amount, inline_datum_cbor, spent)
-                                VALUES ($1, $2, $3, $4, $5, $6, $7, false)
-                                ON CONFLICT (tx_hash, output_index) DO UPDATE
-                                    SET vendor_contract_id = EXCLUDED.vendor_contract_id,
-                                        address = COALESCE(EXCLUDED.address, treasury.utxos.address),
-                                        address_type = COALESCE(EXCLUDED.address_type, treasury.utxos.address_type),
-                                        lovelace_amount = COALESCE(EXCLUDED.lovelace_amount, treasury.utxos.lovelace_amount),
-                                        inline_datum_cbor = COALESCE(EXCLUDED.inline_datum_cbor, treasury.utxos.inline_datum_cbor)
-                                "#
-                            )
-                            .bind(out_tx_hash)
-                            .bind(output_index as i16)
-                            .bind(vc_id)
-                            .bind(&address)
-                            .bind(address_type)
-                            .bind(lovelace_amount)
-                            .bind(&out_datum)
-                            .execute(&self.pool)
-                            .await?;
-                        }
-                    }
-                }
-
-                return Ok(Some(vc_id));
+                candidates.push((input_tx_hash.clone(), *input_output_index, vc_id));
             }
         }
 
-        tracing::warn!("No tracked UTXO found for tx {} inputs", tx_hash);
-        Ok(None)
+        if candidates.is_empty() {
+            tracing::warn!("No tracked UTXO found for tx {} inputs", tx_hash);
+            return Ok(None);
+        }
+
+        // Disambiguate when multiple project chains feed this tx. Prefer the candidate
+        // whose stored milestones match the hint keys carried by the event metadata
+        // (the `body.milestones` keys for complete/withdraw). Falls back to the first
+        // candidate if no hint matches.
+        let chosen_idx = if candidates.len() > 1 && !milestone_id_hints.is_empty() {
+            let mut best_idx = 0usize;
+            let mut best_score: i64 = -1;
+            for (i, (_, _, vc_id)) in candidates.iter().enumerate() {
+                let score: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM treasury.milestones WHERE vendor_contract_id = $1 AND milestone_id = ANY($2)"
+                )
+                .bind(vc_id)
+                .bind(milestone_id_hints)
+                .fetch_one(&self.pool)
+                .await?;
+                if score > best_score {
+                    best_score = score;
+                    best_idx = i;
+                }
+            }
+            best_idx
+        } else {
+            0
+        };
+
+        let (input_tx_hash, input_output_index, vc_id) = candidates[chosen_idx].clone();
+
+        // Get the input UTXO's script address as a fallback for pruned outputs
+        let input_address: Option<String> = sqlx::query_scalar(
+            "SELECT address FROM treasury.utxos WHERE tx_hash = $1 AND output_index = $2"
+        )
+        .bind(&input_tx_hash)
+        .bind(input_output_index)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+
+        // Mark this UTXO as spent and record the new outputs
+        sqlx::query(
+            r#"
+            UPDATE treasury.utxos
+            SET spent = true, spent_tx_hash = $1
+            WHERE tx_hash = $2 AND output_index = $3
+            "#
+        )
+        .bind(tx_hash)
+        .bind(&input_tx_hash)
+        .bind(input_output_index)
+        .execute(&self.pool)
+        .await?;
+
+        // Record the outputs of this transaction with the same vendor_contract_id
+        let outputs: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT outputs::jsonb FROM yaci_store.transaction WHERE tx_hash = $1"
+        )
+        .bind(tx_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(serde_json::Value::Array(output_arr)) = outputs {
+            for output in output_arr {
+                if let (Some(out_tx_hash), Some(output_index)) = (
+                    output.get("tx_hash").and_then(|h| h.as_str()),
+                    output.get("output_index").and_then(|i| i.as_i64())
+                ) {
+                    let (address, lovelace_amount, out_datum) = {
+                        let (addr, amt, datum) = self.lookup_utxo(out_tx_hash, output_index as i16).await?;
+                        if addr.is_some() {
+                            (addr, amt, datum)
+                        } else {
+                            (input_address.clone(), None, None)
+                        }
+                    };
+
+                    if !address.as_ref().map_or(false, |a| a.starts_with("addr1x")) {
+                        continue;
+                    }
+
+                    let address_type = Some("vendor_contract");
+
+                    sqlx::query(
+                        r#"
+                        INSERT INTO treasury.utxos (tx_hash, output_index, vendor_contract_id, address, address_type, lovelace_amount, inline_datum_cbor, spent)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, false)
+                        ON CONFLICT (tx_hash, output_index) DO UPDATE
+                            SET vendor_contract_id = EXCLUDED.vendor_contract_id,
+                                address = COALESCE(EXCLUDED.address, treasury.utxos.address),
+                                address_type = COALESCE(EXCLUDED.address_type, treasury.utxos.address_type),
+                                lovelace_amount = COALESCE(EXCLUDED.lovelace_amount, treasury.utxos.lovelace_amount),
+                                inline_datum_cbor = COALESCE(EXCLUDED.inline_datum_cbor, treasury.utxos.inline_datum_cbor)
+                        "#
+                    )
+                    .bind(out_tx_hash)
+                    .bind(output_index as i16)
+                    .bind(vc_id)
+                    .bind(&address)
+                    .bind(address_type)
+                    .bind(lovelace_amount)
+                    .bind(&out_datum)
+                    .execute(&self.pool)
+                    .await?;
+                }
+            }
+        }
+
+        Ok(Some(vc_id))
     }
 
     /// Pre-fetch UTXOs from yaci_store into treasury.utxos before they can be pruned.
@@ -1400,6 +1442,20 @@ fn extract_milestone_label_description(
         if label.is_empty() { None } else { Some(label) },
         raw_description,
     )
+}
+
+/// Extract milestone identifier hints from a complete/withdraw event body.
+/// Used to disambiguate which vendor contract a tx belongs to when its inputs span
+/// multiple project chains (e.g. fee/collateral pulled from a sibling contract).
+fn collect_milestone_id_hints(event_body: &Value) -> Vec<String> {
+    let mut hints: Vec<String> = Vec::new();
+    if let Some(obj) = event_body.get("milestones").and_then(|m| m.as_object()) {
+        hints.extend(obj.keys().cloned());
+    }
+    if let Some(s) = event_body.get("milestone").and_then(|m| m.as_str()) {
+        hints.push(s.to_string());
+    }
+    hints
 }
 
 /// Extract text from a field that might be a string or array
