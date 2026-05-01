@@ -20,7 +20,7 @@ use pallas_primitives::alonzo::{BigInt, PlutusData};
 
 /// Parsed vendor contract datum
 #[derive(Debug, Clone)]
-pub struct ParsedVendorDatum {
+pub struct ParsedProjectDatum {
     /// Vendor payment key hash (hex)
     pub vendor_payment_key_hash: String,
     /// Per-milestone data from datum
@@ -53,7 +53,7 @@ pub struct ParsedMilestoneDatum {
 ///    storage in the single `vendor_payment_key_hash` column.
 ///
 /// The milestones array structure is identical between the two formats.
-pub fn parse_vendor_contract_datum(cbor_hex: &str) -> anyhow::Result<ParsedVendorDatum> {
+pub fn parse_project_datum(cbor_hex: &str) -> anyhow::Result<ParsedProjectDatum> {
     let bytes = hex::decode(cbor_hex).context("invalid hex in datum")?;
     let datum: PlutusData =
         pallas_codec::minicbor::decode(&bytes).context("failed to decode CBOR datum")?;
@@ -86,7 +86,7 @@ pub fn parse_vendor_contract_datum(cbor_hex: &str) -> anyhow::Result<ParsedVendo
         milestones.push(ms);
     }
 
-    Ok(ParsedVendorDatum {
+    Ok(ParsedProjectDatum {
         vendor_payment_key_hash,
         milestones,
     })
@@ -298,16 +298,16 @@ mod tests {
 
     #[test]
     fn test_parse_empty_hex_fails() {
-        assert!(parse_vendor_contract_datum("").is_err());
+        assert!(parse_project_datum("").is_err());
     }
 
     #[test]
     fn test_parse_invalid_hex_fails() {
-        assert!(parse_vendor_contract_datum("zzzz").is_err());
+        assert!(parse_project_datum("zzzz").is_err());
     }
 
     #[test]
     fn test_parse_invalid_cbor_fails() {
-        assert!(parse_vendor_contract_datum("deadbeef").is_err());
+        assert!(parse_project_datum("deadbeef").is_err());
     }
 }

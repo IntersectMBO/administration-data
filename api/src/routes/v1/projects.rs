@@ -10,7 +10,7 @@ use crate::errors::ApiError;
 use crate::models::v1::{
     ApiResponse, EventResponse, EventWithContextRow, MilestoneResponse, MilestoneRow,
     PaginatedResponse, PaginationQuery, ProjectEventsQuery, UtxoResponse, UtxoRow,
-    VendorContractDetail, VendorContractSummary, VendorContractSummaryRow, VendorContractsQuery,
+    ProjectDetail, ProjectSummary, ProjectSummaryRow, ProjectsQuery,
 };
 
 /// List all vendor contracts
@@ -18,17 +18,17 @@ use crate::models::v1::{
 /// Returns a paginated list of vendor contracts with filtering and search support.
 #[utoipa::path(
     get,
-    path = "/api/v1/vendor-contracts",
-    params(VendorContractsQuery),
+    path = "/api/v1/projects",
+    params(ProjectsQuery),
     responses(
-        (status = 200, description = "List of vendor contracts", body = PaginatedResponse<Vec<VendorContractSummary>>)
+        (status = 200, description = "List of vendor contracts", body = PaginatedResponse<Vec<ProjectSummary>>)
     ),
-    tag = "Vendor Contracts"
+    tag = "Projects"
 )]
-pub async fn list_vendor_contracts(
+pub async fn list_projects(
     Extension(pool): Extension<PgPool>,
-    Query(params): Query<VendorContractsQuery>,
-) -> Result<Json<PaginatedResponse<Vec<VendorContractSummary>>>, ApiError> {
+    Query(params): Query<ProjectsQuery>,
+) -> Result<Json<PaginatedResponse<Vec<ProjectSummary>>>, ApiError> {
     let page = params.page.max(1);
     let limit = params.limit.min(100).max(1);
     let offset = ((page - 1) * limit) as i64;
@@ -78,7 +78,7 @@ pub async fn list_vendor_contracts(
     };
 
     let count_query = format!(
-        "SELECT COUNT(*) FROM treasury.v_vendor_contracts_summary {}",
+        "SELECT COUNT(*) FROM treasury.v_projects_summary {}",
         where_clause
     );
 
@@ -102,7 +102,7 @@ pub async fn list_vendor_contracts(
     let data_query = format!(
         r#"
         SELECT *
-        FROM treasury.v_vendor_contracts_summary
+        FROM treasury.v_projects_summary
         {}
         ORDER BY {} {} NULLS LAST
         LIMIT ${} OFFSET ${}
@@ -114,7 +114,7 @@ pub async fn list_vendor_contracts(
         bind_index + 1
     );
 
-    let mut data_q = sqlx::query_as::<_, VendorContractSummaryRow>(&data_query);
+    let mut data_q = sqlx::query_as::<_, ProjectSummaryRow>(&data_query);
 
     if let Some(ref status) = params.status {
         data_q = data_q.bind(status);
@@ -131,31 +131,31 @@ pub async fn list_vendor_contracts(
 
     let rows = data_q.bind(limit_i64).bind(offset).fetch_all(&pool).await?;
 
-    let contracts: Vec<VendorContractSummary> = rows.into_iter().map(VendorContractSummary::from).collect();
+    let contracts: Vec<ProjectSummary> = rows.into_iter().map(ProjectSummary::from).collect();
     Ok(Json(PaginatedResponse::new(contracts, page, limit, total_count)))
 }
 
 /// Get a specific vendor contract by project ID
 #[utoipa::path(
     get,
-    path = "/api/v1/vendor-contracts/{project_id}",
+    path = "/api/v1/projects/{project_id}",
     params(
         ("project_id" = String, Path, description = "Project identifier (e.g., EC-0008-25)")
     ),
     responses(
-        (status = 200, description = "Vendor contract details", body = ApiResponse<VendorContractDetail>),
+        (status = 200, description = "Vendor contract details", body = ApiResponse<ProjectDetail>),
         (status = 404, description = "Vendor contract not found", body = crate::errors::ApiErrorBody)
     ),
-    tag = "Vendor Contracts"
+    tag = "Projects"
 )]
-pub async fn get_vendor_contract(
+pub async fn get_project(
     Extension(pool): Extension<PgPool>,
     Path(project_id): Path<String>,
-) -> Result<Json<ApiResponse<VendorContractDetail>>, ApiError> {
-    let row = sqlx::query_as::<_, VendorContractSummaryRow>(
+) -> Result<Json<ApiResponse<ProjectDetail>>, ApiError> {
+    let row = sqlx::query_as::<_, ProjectSummaryRow>(
         r#"
         SELECT *
-        FROM treasury.v_vendor_contracts_summary
+        FROM treasury.v_projects_summary
         WHERE project_id = $1
         "#,
     )
@@ -164,13 +164,13 @@ pub async fn get_vendor_contract(
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("vendor contract `{}` not found", project_id)))?;
 
-    Ok(Json(ApiResponse::new(VendorContractDetail::from(row))))
+    Ok(Json(ApiResponse::new(ProjectDetail::from(row))))
 }
 
 /// Get milestones for a vendor contract (paginated)
 #[utoipa::path(
     get,
-    path = "/api/v1/vendor-contracts/{project_id}/milestones",
+    path = "/api/v1/projects/{project_id}/milestones",
     params(
         ("project_id" = String, Path, description = "Project identifier"),
         PaginationQuery
@@ -179,9 +179,9 @@ pub async fn get_vendor_contract(
         (status = 200, description = "Project milestones", body = PaginatedResponse<Vec<MilestoneResponse>>),
         (status = 404, description = "Vendor contract not found", body = crate::errors::ApiErrorBody)
     ),
-    tag = "Vendor Contracts"
+    tag = "Projects"
 )]
-pub async fn get_vendor_contract_milestones(
+pub async fn get_project_milestones(
     Extension(pool): Extension<PgPool>,
     Path(project_id): Path<String>,
     Query(params): Query<PaginationQuery>,
@@ -192,7 +192,7 @@ pub async fn get_vendor_contract_milestones(
     let limit_i64 = limit as i64;
 
     let exists = sqlx::query_as::<_, (i32,)>(
-        "SELECT id FROM treasury.vendor_contracts WHERE project_id = $1",
+        "SELECT id FROM treasury.projects WHERE project_id = $1",
     )
     .bind(&project_id)
     .fetch_optional(&pool)
@@ -209,7 +209,7 @@ pub async fn get_vendor_contract_milestones(
         r#"
         SELECT COUNT(*)
         FROM treasury.milestones m
-        JOIN treasury.vendor_contracts vc ON vc.id = m.vendor_contract_id
+        JOIN treasury.projects vc ON vc.id = m.project_db_id
         WHERE vc.project_id = $1 AND NOT m.archived
         "#,
     )
@@ -220,7 +220,7 @@ pub async fn get_vendor_contract_milestones(
     let rows = sqlx::query_as::<_, MilestoneRow>(
         r#"
         SELECT
-            m.id, m.vendor_contract_id, m.milestone_id, m.milestone_order,
+            m.id, m.project_db_id, m.milestone_id, m.milestone_order,
             m.label, m.description, m.acceptance_criteria,
             m.amount_lovelace, m.time_limit,
             m.withdrawn, m.evidence_provided, m.paused, m.archived,
@@ -229,7 +229,7 @@ pub async fn get_vendor_contract_milestones(
             m.archived_by_tx_hash, m.archived_at, m.superseded_by,
             vc.project_id, vc.project_name
         FROM treasury.milestones m
-        JOIN treasury.vendor_contracts vc ON vc.id = m.vendor_contract_id
+        JOIN treasury.projects vc ON vc.id = m.project_db_id
         WHERE vc.project_id = $1 AND NOT m.archived
         ORDER BY m.milestone_order
         LIMIT $2 OFFSET $3
@@ -248,7 +248,7 @@ pub async fn get_vendor_contract_milestones(
 /// Get events for a vendor contract
 #[utoipa::path(
     get,
-    path = "/api/v1/vendor-contracts/{project_id}/events",
+    path = "/api/v1/projects/{project_id}/events",
     params(
         ("project_id" = String, Path, description = "Project identifier"),
         ProjectEventsQuery
@@ -257,9 +257,9 @@ pub async fn get_vendor_contract_milestones(
         (status = 200, description = "Project events", body = PaginatedResponse<Vec<EventResponse>>),
         (status = 404, description = "Vendor contract not found", body = crate::errors::ApiErrorBody)
     ),
-    tag = "Vendor Contracts"
+    tag = "Projects"
 )]
-pub async fn get_vendor_contract_events(
+pub async fn get_project_events(
     Extension(pool): Extension<PgPool>,
     Path(project_id): Path<String>,
     Query(params): Query<ProjectEventsQuery>,
@@ -270,7 +270,7 @@ pub async fn get_vendor_contract_events(
     let limit_i64 = limit as i64;
 
     let exists = sqlx::query_as::<_, (i32,)>(
-        "SELECT id FROM treasury.vendor_contracts WHERE project_id = $1",
+        "SELECT id FROM treasury.projects WHERE project_id = $1",
     )
     .bind(&project_id)
     .fetch_optional(&pool)
@@ -350,7 +350,7 @@ pub async fn get_vendor_contract_events(
 /// Get UTXOs for a vendor contract (paginated)
 #[utoipa::path(
     get,
-    path = "/api/v1/vendor-contracts/{project_id}/utxos",
+    path = "/api/v1/projects/{project_id}/utxos",
     params(
         ("project_id" = String, Path, description = "Project identifier"),
         PaginationQuery
@@ -359,9 +359,9 @@ pub async fn get_vendor_contract_events(
         (status = 200, description = "Project UTXOs", body = PaginatedResponse<Vec<UtxoResponse>>),
         (status = 404, description = "Vendor contract not found", body = crate::errors::ApiErrorBody)
     ),
-    tag = "Vendor Contracts"
+    tag = "Projects"
 )]
-pub async fn get_vendor_contract_utxos(
+pub async fn get_project_utxos(
     Extension(pool): Extension<PgPool>,
     Path(project_id): Path<String>,
     Query(params): Query<PaginationQuery>,
@@ -372,7 +372,7 @@ pub async fn get_vendor_contract_utxos(
     let limit_i64 = limit as i64;
 
     let exists = sqlx::query_as::<_, (i32,)>(
-        "SELECT id FROM treasury.vendor_contracts WHERE project_id = $1",
+        "SELECT id FROM treasury.projects WHERE project_id = $1",
     )
     .bind(&project_id)
     .fetch_optional(&pool)
@@ -389,7 +389,7 @@ pub async fn get_vendor_contract_utxos(
         r#"
         SELECT COUNT(*)
         FROM treasury.utxo_history u
-        JOIN treasury.vendor_contracts vc ON vc.id = u.vendor_contract_id
+        JOIN treasury.projects vc ON vc.id = u.project_db_id
         WHERE vc.project_id = $1 AND NOT u.spent
         "#,
     )
@@ -408,7 +408,7 @@ pub async fn get_vendor_contract_utxos(
             u.slot,
             u.block_number
         FROM treasury.utxo_history u
-        JOIN treasury.vendor_contracts vc ON vc.id = u.vendor_contract_id
+        JOIN treasury.projects vc ON vc.id = u.project_db_id
         WHERE vc.project_id = $1 AND NOT u.spent
         ORDER BY u.slot DESC
         LIMIT $2 OFFSET $3

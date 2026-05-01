@@ -9,6 +9,7 @@ use sqlx::PgPool;
 use crate::errors::ApiError;
 use crate::models::v1::{
     ApiResponse, MilestoneResponse, MilestoneRow, MilestonesQuery, PaginatedResponse,
+    PaginationQuery,
 };
 
 /// List all milestones
@@ -97,7 +98,7 @@ pub async fn list_milestones(
         r#"
         SELECT COUNT(*)
         FROM treasury.milestones m
-        JOIN treasury.vendor_contracts vc ON vc.id = m.vendor_contract_id
+        JOIN treasury.projects vc ON vc.id = m.project_db_id
         {}
         "#,
         where_clause
@@ -131,7 +132,7 @@ pub async fn list_milestones(
         r#"
         SELECT
             m.id,
-            m.vendor_contract_id,
+            m.project_db_id,
             m.milestone_id,
             m.milestone_order,
             m.label,
@@ -156,7 +157,7 @@ pub async fn list_milestones(
             vc.project_id,
             vc.project_name
         FROM treasury.milestones m
-        JOIN treasury.vendor_contracts vc ON vc.id = m.vendor_contract_id
+        JOIN treasury.projects vc ON vc.id = m.project_db_id
         {}
         ORDER BY {}
         LIMIT ${} OFFSET ${}
@@ -194,12 +195,15 @@ pub async fn list_milestones(
     Ok(Json(PaginatedResponse::new(milestones, page, limit, total_count)))
 }
 
-/// Get a specific milestone by ID
+/// Get a specific milestone by integer database ID
 ///
-/// Returns detailed information about a specific milestone.
+/// Returns detailed information about a specific milestone. The integer
+/// database ID is rarely useful to clients; prefer
+/// `/api/v1/milestones/{project_id}` for the human-readable project-scoped
+/// list.
 #[utoipa::path(
     get,
-    path = "/api/v1/milestones/{id}",
+    path = "/api/v1/milestones/by-id/{id}",
     params(
         ("id" = i32, Path, description = "Milestone database ID")
     ),
@@ -217,7 +221,7 @@ pub async fn get_milestone(
         r#"
         SELECT
             m.id,
-            m.vendor_contract_id,
+            m.project_db_id,
             m.milestone_id,
             m.milestone_order,
             m.label,
@@ -242,7 +246,7 @@ pub async fn get_milestone(
             vc.project_id,
             vc.project_name
         FROM treasury.milestones m
-        JOIN treasury.vendor_contracts vc ON vc.id = m.vendor_contract_id
+        JOIN treasury.projects vc ON vc.id = m.project_db_id
         WHERE m.id = $1
         "#
     )
@@ -252,4 +256,86 @@ pub async fn get_milestone(
     .ok_or_else(|| ApiError::NotFound(format!("milestone `{}` not found", id)))?;
 
     Ok(Json(ApiResponse::new(MilestoneResponse::from(row))))
+}
+
+/// List milestones for a project (paginated)
+///
+/// Convenience endpoint mirroring `/api/v1/projects/{project_id}/milestones`,
+/// served under `/api/v1/milestones/{project_id}` for clients that prefer
+/// the milestones-rooted hierarchy.
+#[utoipa::path(
+    get,
+    path = "/api/v1/milestones/{project_id}",
+    params(
+        ("project_id" = String, Path, description = "Project identifier (e.g., EC-0008-25)"),
+        PaginationQuery
+    ),
+    responses(
+        (status = 200, description = "Milestones for the project", body = PaginatedResponse<Vec<MilestoneResponse>>),
+        (status = 404, description = "Project not found", body = crate::errors::ApiErrorBody)
+    ),
+    tag = "Milestones"
+)]
+pub async fn list_milestones_by_project(
+    Extension(pool): Extension<PgPool>,
+    Path(project_id): Path<String>,
+    Query(params): Query<PaginationQuery>,
+) -> Result<Json<PaginatedResponse<Vec<MilestoneResponse>>>, ApiError> {
+    let page = params.page.max(1);
+    let limit = params.limit.min(100).max(1);
+    let offset = ((page - 1) * limit) as i64;
+    let limit_i64 = limit as i64;
+
+    let exists = sqlx::query_as::<_, (i32,)>(
+        "SELECT id FROM treasury.projects WHERE project_id = $1",
+    )
+    .bind(&project_id)
+    .fetch_optional(&pool)
+    .await?;
+    if exists.is_none() {
+        return Err(ApiError::NotFound(format!(
+            "project `{}` not found",
+            project_id
+        )));
+    }
+
+    let (total_count,): (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(*)
+        FROM treasury.milestones m
+        JOIN treasury.projects p ON p.id = m.project_db_id
+        WHERE p.project_id = $1 AND NOT m.archived
+        "#,
+    )
+    .bind(&project_id)
+    .fetch_one(&pool)
+    .await?;
+
+    let rows = sqlx::query_as::<_, MilestoneRow>(
+        r#"
+        SELECT
+            m.id, m.project_db_id, m.milestone_id, m.milestone_order,
+            m.label, m.description, m.acceptance_criteria,
+            m.amount_lovelace, m.time_limit,
+            m.withdrawn, m.evidence_provided, m.paused, m.archived,
+            m.complete_tx_hash, m.complete_time, m.complete_description, m.evidence,
+            m.withdraw_tx_hash, m.withdraw_time, m.withdraw_amount,
+            m.archived_by_tx_hash, m.archived_at, m.superseded_by,
+            p.project_id, p.project_name
+        FROM treasury.milestones m
+        JOIN treasury.projects p ON p.id = m.project_db_id
+        WHERE p.project_id = $1 AND NOT m.archived
+        ORDER BY m.milestone_order
+        LIMIT $2 OFFSET $3
+        "#,
+    )
+    .bind(&project_id)
+    .bind(limit_i64)
+    .bind(offset)
+    .fetch_all(&pool)
+    .await?;
+
+    let milestones: Vec<MilestoneResponse> =
+        rows.into_iter().map(MilestoneResponse::from).collect();
+    Ok(Json(PaginatedResponse::new(milestones, page, limit, total_count)))
 }

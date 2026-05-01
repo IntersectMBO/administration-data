@@ -139,7 +139,7 @@ pub async fn get_treasury_events(
         SELECT COUNT(*)
         FROM treasury.events e
         JOIN treasury.treasury_contracts tc ON tc.id = e.treasury_id
-        WHERE e.event_type = ANY($1) AND e.vendor_contract_id IS NULL
+        WHERE e.event_type = ANY($1) AND e.project_db_id IS NULL
         "#,
     )
     .bind(&treasury_event_types)

@@ -25,8 +25,20 @@ CREATE TABLE IF NOT EXISTS treasury.treasury_contracts (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Vendor Contracts (PSSC) - Project-specific contracts linked to treasury
+-- Vendor Contract (PSSC) - the *one* on-chain script address that holds every
+-- project's funds, distinguished only by inline datum. Singleton in our deployment.
 CREATE TABLE IF NOT EXISTS treasury.vendor_contracts (
+    id               SERIAL PRIMARY KEY,
+    treasury_id      INT REFERENCES treasury.treasury_contracts(id),
+    address          TEXT UNIQUE NOT NULL,        -- Shared PSSC script address (addr1x...)
+    stake_credential TEXT,                        -- Stake credential portion of the address
+    created_at       TIMESTAMPTZ DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Projects - One row per `fund` event; identified by `project_id` (e.g. EC-0008-25).
+-- Funds and milestones live at the shared PSSC above, distinguished by datum.
+CREATE TABLE IF NOT EXISTS treasury.projects (
     id SERIAL PRIMARY KEY,
     treasury_id INT REFERENCES treasury.treasury_contracts(id),
     project_id TEXT UNIQUE NOT NULL,             -- Logical identifier (e.g., "EC-0008-25")
@@ -48,7 +60,7 @@ CREATE TABLE IF NOT EXISTS treasury.vendor_contracts (
 -- Milestones - Each vendor contract has ordered milestones
 CREATE TABLE IF NOT EXISTS treasury.milestones (
     id SERIAL PRIMARY KEY,
-    vendor_contract_id INT NOT NULL REFERENCES treasury.vendor_contracts(id) ON DELETE CASCADE,
+    project_db_id INT NOT NULL REFERENCES treasury.projects(id) ON DELETE CASCADE,
     milestone_id TEXT NOT NULL,                  -- Logical identifier (e.g., "m-0")
     milestone_order INT NOT NULL,                -- Position (1, 2, 3...)
     label TEXT,                                  -- Milestone name
@@ -94,7 +106,7 @@ CREATE TABLE IF NOT EXISTS treasury.events (
     block_time BIGINT,                           -- Block timestamp
     event_type TEXT NOT NULL,                    -- publish/initialize/fund/complete/disburse/etc.
     treasury_id INT REFERENCES treasury.treasury_contracts(id),
-    vendor_contract_id INT REFERENCES treasury.vendor_contracts(id),
+    project_db_id INT REFERENCES treasury.projects(id),
     milestone_id INT REFERENCES treasury.milestones(id),
     amount_lovelace BIGINT,                      -- Amount involved
     reason TEXT,                                 -- Justification (pause/cancel/modify)
@@ -110,7 +122,7 @@ CREATE TABLE IF NOT EXISTS treasury.utxo_history (
     output_index SMALLINT NOT NULL,              -- Output index
     address TEXT,                                -- Owner address (optional for tracking)
     address_type TEXT,                           -- treasury/vendor_contract/vendor
-    vendor_contract_id INT REFERENCES treasury.vendor_contracts(id),
+    project_db_id INT REFERENCES treasury.projects(id),
     lovelace_amount BIGINT,                      -- Amount (optional for tracking)
     slot BIGINT,                                 -- Creation slot (optional for tracking)
     block_number BIGINT,                         -- Block number
@@ -145,41 +157,41 @@ CREATE INDEX IF NOT EXISTS idx_treasury_address ON treasury.treasury_contracts(c
 CREATE INDEX IF NOT EXISTS idx_treasury_status ON treasury.treasury_contracts(status);
 
 -- Vendor contracts (projects)
-CREATE INDEX IF NOT EXISTS idx_vendor_treasury ON treasury.vendor_contracts(treasury_id);
-CREATE INDEX IF NOT EXISTS idx_vendor_project_id ON treasury.vendor_contracts(project_id);
-CREATE INDEX IF NOT EXISTS idx_vendor_status ON treasury.vendor_contracts(status);
-CREATE INDEX IF NOT EXISTS idx_vendor_fund_time ON treasury.vendor_contracts(fund_block_time DESC);
-CREATE INDEX IF NOT EXISTS idx_vendor_contract_address ON treasury.vendor_contracts(contract_address);
-CREATE INDEX IF NOT EXISTS idx_vendor_payment_key_hash ON treasury.vendor_contracts(vendor_payment_key_hash);
-CREATE INDEX IF NOT EXISTS idx_vendor_search ON treasury.vendor_contracts
+CREATE INDEX IF NOT EXISTS idx_project_treasury ON treasury.projects(treasury_id);
+CREATE INDEX IF NOT EXISTS idx_project_project_id ON treasury.projects(project_id);
+CREATE INDEX IF NOT EXISTS idx_project_status ON treasury.projects(status);
+CREATE INDEX IF NOT EXISTS idx_project_fund_time ON treasury.projects(fund_block_time DESC);
+CREATE INDEX IF NOT EXISTS idx_project_contract_address ON treasury.projects(contract_address);
+CREATE INDEX IF NOT EXISTS idx_project_payment_key_hash ON treasury.projects(vendor_payment_key_hash);
+CREATE INDEX IF NOT EXISTS idx_project_search ON treasury.projects
     USING gin (to_tsvector('english', COALESCE(project_name, '') || ' ' || COALESCE(description, '')));
 
 -- Milestones
-CREATE INDEX IF NOT EXISTS idx_milestone_vendor ON treasury.milestones(vendor_contract_id);
-CREATE INDEX IF NOT EXISTS idx_milestone_order ON treasury.milestones(vendor_contract_id, milestone_order);
+CREATE INDEX IF NOT EXISTS idx_milestone_vendor ON treasury.milestones(project_db_id);
+CREATE INDEX IF NOT EXISTS idx_milestone_order ON treasury.milestones(project_db_id, milestone_order);
 -- Only one active (non-archived) milestone per vendor contract + milestone_id
 CREATE UNIQUE INDEX IF NOT EXISTS idx_milestone_active_unique
-    ON treasury.milestones(vendor_contract_id, milestone_id)
+    ON treasury.milestones(project_db_id, milestone_id)
     WHERE NOT archived;
 CREATE INDEX IF NOT EXISTS idx_milestone_not_archived
-    ON treasury.milestones(vendor_contract_id) WHERE NOT archived;
+    ON treasury.milestones(project_db_id) WHERE NOT archived;
 
 -- Events
 CREATE INDEX IF NOT EXISTS idx_event_type ON treasury.events(event_type);
-CREATE INDEX IF NOT EXISTS idx_event_vendor ON treasury.events(vendor_contract_id);
+CREATE INDEX IF NOT EXISTS idx_event_vendor ON treasury.events(project_db_id);
 CREATE INDEX IF NOT EXISTS idx_event_treasury ON treasury.events(treasury_id);
 CREATE INDEX IF NOT EXISTS idx_event_slot ON treasury.events(slot DESC);
 CREATE INDEX IF NOT EXISTS idx_event_block_time ON treasury.events(block_time DESC);
 
 -- UTXOs
 CREATE INDEX IF NOT EXISTS idx_utxo_history_address ON treasury.utxo_history(address);
-CREATE INDEX IF NOT EXISTS idx_utxo_history_vendor ON treasury.utxo_history(vendor_contract_id);
+CREATE INDEX IF NOT EXISTS idx_utxo_history_vendor ON treasury.utxo_history(project_db_id);
 CREATE INDEX IF NOT EXISTS idx_utxo_history_unspent ON treasury.utxo_history(address) WHERE NOT spent;
 CREATE INDEX IF NOT EXISTS idx_utxo_history_slot ON treasury.utxo_history(slot DESC);
-CREATE INDEX IF NOT EXISTS idx_utxo_history_vendor_unspent ON treasury.utxo_history(vendor_contract_id) WHERE NOT spent;
+CREATE INDEX IF NOT EXISTS idx_utxo_history_vendor_unspent ON treasury.utxo_history(project_db_id) WHERE NOT spent;
 
 -- Full-text search across project fields
-CREATE INDEX IF NOT EXISTS idx_vendor_fulltext ON treasury.vendor_contracts
+CREATE INDEX IF NOT EXISTS idx_project_fulltext ON treasury.projects
     USING gin (to_tsvector('english',
         COALESCE(project_id, '') || ' ' ||
         COALESCE(project_name, '') || ' ' ||
@@ -208,8 +220,8 @@ CREATE TRIGGER trg_treasury_contracts_updated_at
     BEFORE UPDATE ON treasury.treasury_contracts
     FOR EACH ROW EXECUTE FUNCTION treasury.update_updated_at();
 
-CREATE TRIGGER trg_vendor_contracts_updated_at
-    BEFORE UPDATE ON treasury.vendor_contracts
+CREATE TRIGGER trg_projects_updated_at
+    BEFORE UPDATE ON treasury.projects
     FOR EACH ROW EXECUTE FUNCTION treasury.update_updated_at();
 
 CREATE TRIGGER trg_milestones_updated_at
@@ -221,7 +233,7 @@ CREATE TRIGGER trg_milestones_updated_at
 -- ============================================================================
 
 -- Vendor contracts with milestone stats, financials, and balance
-CREATE OR REPLACE VIEW treasury.v_vendor_contracts_summary AS
+CREATE OR REPLACE VIEW treasury.v_projects_summary AS
 SELECT
     vc.id,
     vc.treasury_id,
@@ -252,13 +264,13 @@ SELECT
     COALESCE(SUM(u.lovelace_amount) FILTER (WHERE NOT u.spent AND u.address LIKE 'addr1x%'), 0)::BIGINT as current_balance_lovelace,
     COUNT(u.id) FILTER (WHERE NOT u.spent AND u.address LIKE 'addr1x%') as utxo_count,
     -- Last event time
-    (SELECT MAX(e.block_time) FROM treasury.events e WHERE e.vendor_contract_id = vc.id) as last_event_time,
+    (SELECT MAX(e.block_time) FROM treasury.events e WHERE e.project_db_id = vc.id) as last_event_time,
     -- Event count
-    (SELECT COUNT(*) FROM treasury.events e WHERE e.vendor_contract_id = vc.id) as event_count
-FROM treasury.vendor_contracts vc
+    (SELECT COUNT(*) FROM treasury.events e WHERE e.project_db_id = vc.id) as event_count
+FROM treasury.projects vc
 LEFT JOIN treasury.treasury_contracts tc ON tc.id = vc.treasury_id
-LEFT JOIN treasury.milestones m ON m.vendor_contract_id = vc.id
-LEFT JOIN treasury.utxo_history u ON u.vendor_contract_id = vc.id
+LEFT JOIN treasury.milestones m ON m.project_db_id = vc.id
+LEFT JOIN treasury.utxo_history u ON u.project_db_id = vc.id
 GROUP BY vc.id, tc.contract_instance;
 
 -- Milestone timeline with vendor context
@@ -289,7 +301,7 @@ SELECT
     vc.project_name,
     vc.vendor_address
 FROM treasury.milestones m
-JOIN treasury.vendor_contracts vc ON vc.id = m.vendor_contract_id
+JOIN treasury.projects vc ON vc.id = m.project_db_id
 ORDER BY vc.project_id, m.milestone_order;
 
 -- Recent events with full context
@@ -312,7 +324,7 @@ SELECT
     m.label as milestone_label,
     m.milestone_order
 FROM treasury.events e
-LEFT JOIN treasury.vendor_contracts vc ON vc.id = e.vendor_contract_id
+LEFT JOIN treasury.projects vc ON vc.id = e.project_db_id
 LEFT JOIN treasury.treasury_contracts tc ON tc.id = COALESCE(e.treasury_id, vc.treasury_id)
 LEFT JOIN treasury.milestones m ON m.id = e.milestone_id
 ORDER BY e.slot DESC;
@@ -330,7 +342,7 @@ SELECT
     tc.initialized_tx_hash,
     tc.initialized_at,
     tc.permissions,
-    COUNT(DISTINCT vc.id) as vendor_contract_count,
+    COUNT(DISTINCT vc.id) as project_count,
     COUNT(DISTINCT vc.id) FILTER (WHERE vc.status = 'active') as active_contracts,
     COUNT(DISTINCT vc.id) FILTER (WHERE vc.status = 'completed') as completed_contracts,
     COUNT(DISTINCT vc.id) FILTER (WHERE vc.status = 'cancelled') as cancelled_contracts,
@@ -349,7 +361,7 @@ SELECT
     tc.created_at,
     tc.updated_at
 FROM treasury.treasury_contracts tc
-LEFT JOIN treasury.vendor_contracts vc ON vc.treasury_id = tc.id
+LEFT JOIN treasury.projects vc ON vc.treasury_id = tc.id
 GROUP BY tc.id;
 
 -- Events with full context (treasury, project, milestone info)
@@ -377,7 +389,7 @@ SELECT
     m.label as milestone_label,
     m.milestone_order
 FROM treasury.events e
-LEFT JOIN treasury.vendor_contracts vc ON vc.id = e.vendor_contract_id
+LEFT JOIN treasury.projects vc ON vc.id = e.project_db_id
 LEFT JOIN treasury.treasury_contracts tc ON tc.id = COALESCE(e.treasury_id, vc.treasury_id)
 LEFT JOIN treasury.milestones m ON m.id = e.milestone_id;
 
@@ -402,20 +414,20 @@ SELECT
     COALESCE((
         SELECT SUM(u2.lovelace_amount)
         FROM treasury.utxo_history u2
-        JOIN treasury.vendor_contracts vc2 ON vc2.id = u2.vendor_contract_id
+        JOIN treasury.projects vc2 ON vc2.id = u2.project_db_id
         WHERE vc2.treasury_id = tc.id AND NOT u2.spent AND u2.address LIKE 'addr1x%'
     ), 0)::BIGINT as project_balance_lovelace,
     -- Counts
     COUNT(DISTINCT vc.id) as project_count,
     COUNT(DISTINCT CASE WHEN vc.status = 'active' THEN vc.id END) as active_project_count
 FROM treasury.treasury_contracts tc
-LEFT JOIN treasury.vendor_contracts vc ON vc.treasury_id = tc.id
+LEFT JOIN treasury.projects vc ON vc.treasury_id = tc.id
 LEFT JOIN (
     SELECT
-        m.vendor_contract_id,
+        m.project_db_id,
         SUM(COALESCE(m.withdraw_amount, 0)) as total_withdrawn
     FROM treasury.milestones m
     WHERE NOT m.archived
-    GROUP BY m.vendor_contract_id
-) m_totals ON m_totals.vendor_contract_id = vc.id
+    GROUP BY m.project_db_id
+) m_totals ON m_totals.project_db_id = vc.id
 GROUP BY tc.id;

@@ -162,9 +162,34 @@ pub struct ChainStatus {
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TotalsBlock {
     pub events: i64,
-    pub vendor_contracts: i64,
+    pub projects: i64,
     /// Count of `treasury.events` rows by `event_type`.
     pub events_by_type: std::collections::HashMap<String, i64>,
+}
+
+// ============================================================================
+// VENDOR CONTRACT (singleton — the shared PSSC)
+// ============================================================================
+
+/// Response for `/api/v1/vendor-contract` — the *one* shared PSSC script
+/// address every project sits at, plus a quick rollup of the projects.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct VendorContractResponse {
+    /// Shared PSSC script address (`addr1x...`).
+    pub address: String,
+    /// Stake credential portion of the address.
+    pub stake_credential: Option<String>,
+    /// Project rollup at this vendor contract.
+    pub projects: VendorContractProjectsBlock,
+}
+
+/// Project rollup nested inside `VendorContractResponse`.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct VendorContractProjectsBlock {
+    /// Total projects.
+    pub total: i64,
+    /// Counts keyed by `status` (`active`, `paused`, `completed`, `cancelled`).
+    pub by_status: std::collections::HashMap<String, i64>,
 }
 
 // ============================================================================
@@ -207,13 +232,13 @@ pub struct TreasuryResponse {
 /// Treasury statistics
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct TreasuryStatistics {
-    /// Total vendor contracts
-    pub vendor_contract_count: i64,
-    /// Active vendor contracts
+    /// Total projects
+    pub project_count: i64,
+    /// Active projects
     pub active_contracts: i64,
-    /// Completed vendor contracts
+    /// Completed projects
     pub completed_contracts: i64,
-    /// Cancelled vendor contracts
+    /// Cancelled projects
     pub cancelled_contracts: i64,
     /// Total events
     pub total_events: i64,
@@ -243,7 +268,7 @@ pub struct TreasurySummaryRow {
     pub initialized_tx_hash: Option<String>,
     pub initialized_at: Option<i64>,
     pub permissions: Option<serde_json::Value>,
-    pub vendor_contract_count: Option<i64>,
+    pub project_count: Option<i64>,
     pub active_contracts: Option<i64>,
     pub completed_contracts: Option<i64>,
     pub cancelled_contracts: Option<i64>,
@@ -270,7 +295,7 @@ impl From<TreasurySummaryRow> for TreasuryResponse {
             initialized_at: ChainTime::maybe_from_secs(row.initialized_at),
             permissions: row.permissions,
             statistics: TreasuryStatistics {
-                vendor_contract_count: row.vendor_contract_count.unwrap_or(0),
+                project_count: row.project_count.unwrap_or(0),
                 active_contracts: row.active_contracts.unwrap_or(0),
                 completed_contracts: row.completed_contracts.unwrap_or(0),
                 cancelled_contracts: row.cancelled_contracts.unwrap_or(0),
@@ -293,7 +318,7 @@ impl From<TreasurySummaryRow> for TreasuryResponse {
 
 /// Vendor contract (project) summary
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct VendorContractSummary {
+pub struct ProjectSummary {
     /// Internal database ID
     pub id: i32,
     /// Logical project identifier (e.g., "EC-0008-25")
@@ -328,7 +353,7 @@ pub struct VendorContractSummary {
 
 /// Vendor contract detail (full response)
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct VendorContractDetail {
+pub struct ProjectDetail {
     /// Internal database ID
     pub id: i32,
     /// Logical project identifier (e.g., "EC-0008-25")
@@ -409,7 +434,7 @@ pub struct TreasuryReference {
 /// Database row for vendor contract summary
 #[derive(Debug, FromRow)]
 #[allow(dead_code)]
-pub struct VendorContractSummaryRow {
+pub struct ProjectSummaryRow {
     pub id: i32,
     pub treasury_id: Option<i32>,
     pub project_id: String,
@@ -438,8 +463,8 @@ pub struct VendorContractSummaryRow {
     pub event_count: Option<i64>,
 }
 
-impl From<VendorContractSummaryRow> for VendorContractSummary {
-    fn from(row: VendorContractSummaryRow) -> Self {
+impl From<ProjectSummaryRow> for ProjectSummary {
+    fn from(row: ProjectSummaryRow) -> Self {
         let initial_amount = row.initial_amount_lovelace.unwrap_or(0);
         let total_withdrawn = row.total_withdrawn_lovelace.unwrap_or(0);
         let current_balance = row.current_balance_lovelace.unwrap_or(0);
@@ -483,8 +508,8 @@ impl From<VendorContractSummaryRow> for VendorContractSummary {
     }
 }
 
-impl From<VendorContractSummaryRow> for VendorContractDetail {
-    fn from(row: VendorContractSummaryRow) -> Self {
+impl From<ProjectSummaryRow> for ProjectDetail {
+    fn from(row: ProjectSummaryRow) -> Self {
         let initial_amount = row.initial_amount_lovelace.unwrap_or(0);
         let total_withdrawn = row.total_withdrawn_lovelace.unwrap_or(0);
         let current_balance = row.current_balance_lovelace.unwrap_or(0);
@@ -622,7 +647,7 @@ pub struct ProjectReference {
 #[allow(dead_code)]
 pub struct MilestoneRow {
     pub id: i32,
-    pub vendor_contract_id: i32,
+    pub project_db_id: i32,
     pub milestone_id: String,
     pub milestone_order: i32,
     pub label: Option<String>,
@@ -881,8 +906,10 @@ impl From<UtxoRow> for UtxoResponse {
 /// Comprehensive statistics response
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct StatisticsResponse {
-    /// Treasury statistics
+    /// Treasury (singleton TRSC) statistics
     pub treasury: TreasuryStats,
+    /// Vendor contract (singleton shared PSSC) statistics
+    pub vendor_contracts: VendorContractStats,
     /// Project statistics
     pub projects: ProjectStats,
     /// Milestone statistics
@@ -904,6 +931,23 @@ pub struct TreasuryStats {
     pub active_count: i64,
     /// Number of disbursements made
     pub disbursed_count: i64,
+}
+
+/// Vendor contract (singleton) statistics — the shared PSSC every project sits at.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct VendorContractStats {
+    /// Total vendor contracts known to the API. Expected to be 1 for our deployment.
+    pub total_count: i64,
+    /// Shared PSSC script address (`addr1x...`). Null until the first fund event lands.
+    pub address: Option<String>,
+    /// Number of distinct projects bound to this vendor contract.
+    pub project_count: i64,
+    /// Total UTXOs ever observed at this address (regardless of spent state).
+    pub utxo_history_count: i64,
+    /// Currently unspent UTXOs at this address.
+    pub unspent_utxo_count: i64,
+    /// Sum of unspent lovelace held at this address.
+    pub current_balance_lovelace: i64,
 }
 
 /// Project statistics
@@ -976,7 +1020,7 @@ fn default_limit() -> u32 { 50 }
 
 /// Vendor contracts query parameters
 #[derive(Debug, Deserialize, ToSchema, IntoParams)]
-pub struct VendorContractsQuery {
+pub struct ProjectsQuery {
     /// Page number (1-indexed)
     #[serde(default = "default_page")]
     pub page: u32,

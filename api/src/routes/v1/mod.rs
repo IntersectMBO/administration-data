@@ -9,7 +9,8 @@
 //! - Raw and parsed metadata.
 
 pub mod treasury;
-pub mod vendor_contracts;
+pub mod vendor_contract;
+pub mod projects;
 pub mod milestones;
 pub mod events;
 pub mod statistics;
@@ -21,19 +22,22 @@ pub fn router() -> Router {
     Router::new()
         // Status endpoint
         .route("/status", get(status::get_status))
-        // Treasury endpoints
+        // Treasury endpoint (the singleton TRSC)
         .route("/treasury", get(treasury::get_treasury))
         .route("/treasury/utxos", get(treasury::get_treasury_utxos))
         .route("/treasury/events", get(treasury::get_treasury_events))
-        // Vendor contracts endpoints
-        .route("/vendor-contracts", get(vendor_contracts::list_vendor_contracts))
-        .route("/vendor-contracts/:project_id", get(vendor_contracts::get_vendor_contract))
-        .route("/vendor-contracts/:project_id/milestones", get(vendor_contracts::get_vendor_contract_milestones))
-        .route("/vendor-contracts/:project_id/events", get(vendor_contracts::get_vendor_contract_events))
-        .route("/vendor-contracts/:project_id/utxos", get(vendor_contracts::get_vendor_contract_utxos))
+        // Vendor contract endpoint (the singleton shared PSSC)
+        .route("/vendor-contract", get(vendor_contract::get_vendor_contract))
+        // Project endpoints (one per fund event; 42 of these for our deployment)
+        .route("/projects", get(projects::list_projects))
+        .route("/projects/:project_id", get(projects::get_project))
+        .route("/projects/:project_id/milestones", get(projects::get_project_milestones))
+        .route("/projects/:project_id/events", get(projects::get_project_events))
+        .route("/projects/:project_id/utxos", get(projects::get_project_utxos))
         // Milestones endpoints
         .route("/milestones", get(milestones::list_milestones))
-        .route("/milestones/:id", get(milestones::get_milestone))
+        .route("/milestones/by-id/:id", get(milestones::get_milestone))
+        .route("/milestones/:project_id", get(milestones::list_milestones_by_project))
         // Events endpoints
         .route("/events", get(events::list_events))
         .route("/events/recent", get(events::get_recent_events))
@@ -101,8 +105,8 @@ pub mod status {
             .fetch_one(&pool)
             .await?;
 
-        let (total_vendor_contracts,): (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM treasury.vendor_contracts")
+        let (total_projects,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM treasury.projects")
                 .fetch_one(&pool)
                 .await?;
 
@@ -114,7 +118,7 @@ pub mod status {
         let events_by_type: HashMap<String, i64> = by_type_rows.into_iter().collect();
 
         Ok(Json(ApiResponse::new(StatusResponse {
-            api_version: "1.1.0".to_string(),
+            api_version: "2.0.0".to_string(),
             database: DatabaseStatus {
                 connected: true,
                 checked_at: chrono::Utc::now(),
@@ -130,7 +134,7 @@ pub mod status {
             },
             totals: TotalsBlock {
                 events: total_events,
-                vendor_contracts: total_vendor_contracts,
+                projects: total_projects,
                 events_by_type,
             },
         })))

@@ -6,6 +6,68 @@ the equivalent merge). Pre-1.0 versions allowed breaking changes; the
 project is now operating under a 1.x line and breaking changes here are
 flagged as such.
 
+## v2.0.0 — 2026-05-01
+
+Semantic rename pass: split "vendor contract" into the *singleton on-chain
+script address* (the shared PSSC, one row) and the 42 *projects* (one per
+fund event) that sit at it. Old paths are gone (404), not aliased — pre-1.0
+contract still applies.
+
+### Breaking — paths
+
+- `/api/v1/vendor-contracts` → `/api/v1/projects` (list + filter)
+- `/api/v1/vendor-contracts/{project_id}` → `/api/v1/projects/{project_id}`
+- `/api/v1/vendor-contracts/{project_id}/milestones` →
+  `/api/v1/projects/{project_id}/milestones`
+- `/api/v1/vendor-contracts/{project_id}/events` →
+  `/api/v1/projects/{project_id}/events`
+- `/api/v1/vendor-contracts/{project_id}/utxos` →
+  `/api/v1/projects/{project_id}/utxos`
+
+### Added
+
+- **`GET /api/v1/vendor-contract`** — singleton: returns
+  `{ address, stake_credential, projects: { total, by_status: {...} } }`.
+  The shared PSSC every project sits at.
+- **`GET /api/v1/milestones/{project_id}`** — paginated milestones list
+  under the `/milestones/` root. Equivalent to
+  `/projects/{project_id}/milestones`; differs only in URL hierarchy.
+- **`GET /api/v1/milestones/by-id/{id}`** — single milestone by integer
+  database ID. The previous `/milestones/{id}` lookup moved here to free
+  the parameterised `/milestones/{project_id}` slot for project lookups.
+
+### Breaking — response shapes
+
+- `StatusResponse.totals.vendor_contracts` → `totals.projects`.
+- `TreasuryStatistics.vendor_contract_count` → `project_count`.
+- `Milestone.vendor_contract_id` (FK) is no longer exposed; the canonical
+  link is via `project_id` (text).
+- Numerous internal struct/field renames are not visible in the JSON wire
+  format but appear in the OpenAPI schema list.
+
+### Schema
+
+- Renamed `treasury.vendor_contracts` → `treasury.projects`.
+- Renamed FK column `vendor_contract_id` → `project_db_id` in
+  `treasury.events`, `treasury.milestones`, `treasury.utxo_history`.
+- New singleton `treasury.vendor_contracts (id, treasury_id, address,
+  stake_credential, …)` stores one row per shared PSSC.
+- Renamed view `v_vendor_contracts_summary` → `v_projects_summary`;
+  view bodies updated to use new names.
+- Trigger `trg_vendor_contracts_updated_at` → `trg_projects_updated_at`.
+
+### Internal renames (impact code readers, not the API surface)
+
+- `find_vendor_contract_from_inputs` → `find_project_from_inputs`.
+- `parse_vendor_contract_datum` → `parse_project_datum`;
+  `ParsedVendorDatum` → `ParsedProjectDatum`.
+
+### Migration
+
+Existing deployments must wipe `treasury` schema and re-sync (the
+`utxo_history` Postgres triggers come back via the API's startup hook).
+There is no in-place column-rename migration shipped — pre-1.x stance.
+
 ## v1.1.0 — 2026-05-01
 
 API consistency pass. Several breaking response-shape changes — frontends

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use crate::errors::ApiError;
 use crate::models::v1::{
     ApiResponse, EventStats, FinancialStats, MilestoneStats, ProjectStats,
-    StatisticsResponse, SyncStats, TreasuryStats,
+    StatisticsResponse, SyncStats, TreasuryStats, VendorContractStats,
 };
 
 /// Get comprehensive statistics
@@ -24,32 +24,67 @@ use crate::models::v1::{
 pub async fn get_statistics(
     Extension(pool): Extension<PgPool>,
 ) -> Result<Json<ApiResponse<StatisticsResponse>>, ApiError> {
-    // Treasury stats
     let treasury_stats = get_treasury_stats(&pool).await?;
-
-    // Project stats
+    let vendor_contract_stats = get_vendor_contract_stats(&pool).await?;
     let project_stats = get_project_stats(&pool).await?;
-
-    // Milestone stats
     let milestone_stats = get_milestone_stats(&pool).await?;
-
-    // Event stats
     let event_stats = get_event_stats(&pool).await?;
-
-    // Financial stats
     let financial_stats = get_financial_stats(&pool).await?;
-
-    // Sync stats
     let sync_stats = get_sync_stats(&pool).await?;
 
     Ok(Json(ApiResponse::new(StatisticsResponse {
         treasury: treasury_stats,
+        vendor_contracts: vendor_contract_stats,
         projects: project_stats,
         milestones: milestone_stats,
         events: event_stats,
         financials: financial_stats,
         sync: sync_stats,
     })))
+}
+
+async fn get_vendor_contract_stats(pool: &PgPool) -> Result<VendorContractStats, ApiError> {
+    let (total_count,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM treasury.vendor_contracts")
+            .fetch_one(pool)
+            .await?;
+
+    let address: Option<String> =
+        sqlx::query_scalar("SELECT address FROM treasury.vendor_contracts ORDER BY id LIMIT 1")
+            .fetch_optional(pool)
+            .await?;
+
+    let (project_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM treasury.projects")
+        .fetch_one(pool)
+        .await?;
+
+    let (utxo_history_count, unspent_utxo_count, current_balance_lovelace): (i64, i64, Option<i64>) =
+        if let Some(ref addr) = address {
+            sqlx::query_as(
+                r#"
+                SELECT
+                    COUNT(*)::BIGINT,
+                    COUNT(*) FILTER (WHERE NOT spent)::BIGINT,
+                    COALESCE(SUM(lovelace_amount) FILTER (WHERE NOT spent), 0)::BIGINT
+                FROM treasury.utxo_history
+                WHERE address = $1
+                "#,
+            )
+            .bind(addr)
+            .fetch_one(pool)
+            .await?
+        } else {
+            (0, 0, Some(0))
+        };
+
+    Ok(VendorContractStats {
+        total_count,
+        address,
+        project_count,
+        utxo_history_count,
+        unspent_utxo_count,
+        current_balance_lovelace: current_balance_lovelace.unwrap_or(0),
+    })
 }
 
 async fn get_treasury_stats(pool: &PgPool) -> Result<TreasuryStats, ApiError> {
@@ -89,7 +124,7 @@ async fn get_project_stats(pool: &PgPool) -> Result<ProjectStats, ApiError> {
             COUNT(*) FILTER (WHERE status = 'completed'),
             COUNT(*) FILTER (WHERE status = 'paused'),
             COUNT(*) FILTER (WHERE status = 'cancelled')
-        FROM treasury.vendor_contracts
+        FROM treasury.projects
         "#
     )
     .fetch_one(pool)
@@ -165,7 +200,7 @@ async fn get_event_stats(pool: &PgPool) -> Result<EventStats, ApiError> {
 async fn get_financial_stats(pool: &PgPool) -> Result<FinancialStats, ApiError> {
     // Get total allocated (sum of initial amounts)
     let (total_allocated,): (Option<i64>,) = sqlx::query_as(
-        "SELECT COALESCE(SUM(initial_amount_lovelace), 0)::BIGINT FROM treasury.vendor_contracts"
+        "SELECT COALESCE(SUM(initial_amount_lovelace), 0)::BIGINT FROM treasury.projects"
     )
     .fetch_one(pool)
     .await
