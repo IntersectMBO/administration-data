@@ -49,7 +49,13 @@ Stores vendor/project contract instances (PSSC).
 | status | TEXT | active/paused/completed/cancelled |
 
 ### treasury.milestones
-Stores milestone data for each vendor contract. Uses 4 independent boolean flags instead of a linear status.
+Stores milestone data for each vendor contract. Uses 4 independent boolean flags instead of a linear status; archive model preserves prior versions via `superseded_by`.
+
+State flags (all default FALSE, all independent):
+- `evidence_provided` — vendor submitted a `complete` event
+- `withdrawn` — vendor pulled funds via a `withdraw` event
+- `paused` — derived from inline-datum parsing in `update_milestone_pause_from_datum` (`api/src/services/event_processor.rs:1320`); not present in metadata
+- `archived` — milestone replaced by a `modify` event; the new row is linked via `superseded_by` and queries for current state should include `WHERE NOT archived`
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -64,6 +70,7 @@ Stores milestone data for each vendor contract. Uses 4 independent boolean flags
 | time_limit | BIGINT | POSIXTime in milliseconds from datum |
 | withdrawn | BOOLEAN | Vendor withdrew payment |
 | evidence_provided | BOOLEAN | Vendor submitted completion evidence |
+| paused | BOOLEAN | Oversight committee paused this milestone (datum-derived) |
 | archived | BOOLEAN | Milestone replaced by modify event |
 | withdraw_tx_hash | VARCHAR(64) | Withdrawal transaction |
 | withdraw_time | BIGINT | Withdrawal timestamp |
@@ -96,7 +103,9 @@ Audit log of all TOM (Treasury Oversight Metadata) events.
 | metadata | JSONB | Original TOM metadata body |
 
 ### treasury.utxos
-Tracks UTXOs at treasury-related addresses for event linking.
+Tracks UTXOs at treasury-related addresses for event linking. Two responsibilities:
+1. **Chain trace seed** — outputs of `fund` txs are written here with `vendor_contract_id` set, so `find_vendor_contract_from_inputs` can later trace milestone-event inputs back to a project.
+2. **Datum cache** — `inline_datum_cbor` is stored on each UTXO so pause/resume datum parsing (`update_milestone_pause_from_datum`) keeps working after YACI Store has pruned the row out of `yaci_store.address_utxo`.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -105,8 +114,9 @@ Tracks UTXOs at treasury-related addresses for event linking.
 | output_index | SMALLINT | Output index |
 | address | TEXT | Owner address |
 | address_type | TEXT | treasury/vendor_contract/vendor |
-| vendor_contract_id | INT | FK to vendor_contracts |
+| vendor_contract_id | INT | FK to vendor_contracts (chain-trace seed) |
 | lovelace_amount | BIGINT | Amount |
+| inline_datum_cbor | TEXT | Hex-encoded inline datum (cached for post-prune datum parsing) |
 | slot | BIGINT | Creation slot |
 | block_number | BIGINT | Block number |
 | spent | BOOLEAN | Is spent? |
@@ -114,7 +124,9 @@ Tracks UTXOs at treasury-related addresses for event linking.
 | spent_slot | BIGINT | When spent |
 
 ### treasury.sync_status
-Tracks synchronization progress.
+Tracks synchronization progress. Two rows by convention:
+- `sync_type='events'` — heartbeat for the TOM-event sync loop. `updated_at` only bumps when a new event is processed (idle ticks do not bump it; see [known issue KI-SY-01](../docs/known-issues.md#ki-sy-01--treasurysync_statusupdated_at-doesnt-bump-on-idle-ticks)).
+- `sync_type='utxos'` — checkpoint for the UTXO pre-fetch worker.
 
 | Column | Type | Description |
 |--------|------|-------------|

@@ -223,9 +223,10 @@ The system uses two schemas:
 |-------|-------------|
 | `treasury.treasury_contracts` | Treasury reserve contracts (TRSC) |
 | `treasury.vendor_contracts` | Vendor/project contracts (PSSC) |
-| `treasury.milestones` | Project milestones |
+| `treasury.milestones` | Project milestones (4 independent boolean flags + archive model) |
 | `treasury.events` | All TOM event audit log |
-| `treasury.utxos` | UTXO tracking for event linking |
+| `treasury.utxos` | UTXO tracking for event linking (chain trace + datum cache) |
+| `treasury.sync_status` | Heartbeat: per-stream `last_slot` / `last_block` / `updated_at` |
 
 ### Connecting to Database
 
@@ -268,9 +269,16 @@ This reduces database size by ~95% while keeping all treasury data.
 ## Component Documentation
 
 - [Architecture & Data Flow](docs/architecture.md) - System architecture and data flow diagrams
+- [Event Processing](docs/event-processing.md) - Per-event-type field mappings and write paths
+- [Known Issues](docs/known-issues.md) - Indexed catalog of NULL-field cases, on-chain data quirks, and sync-loop gotchas
 - [API Documentation](api/README.md) - Full API reference
 - [Indexer Setup](indexer/README.md) - YACI Store configuration
 - [Database Schema](database/schema/) - Treasury schema definitions
+
+## Gotchas
+
+- **Cold replay vs continuous operation**: a fresh local sync from an old `STORE_CARDANO_SYNC_START_SLOT` cannot reconstruct UTXO chains whose inputs YACI Store has already pruned. A fraction of historical milestone events will land with `vendor_contract_id = NULL`. See [`docs/known-issues.md`](docs/known-issues.md) `KI-CR-01` and `CLAUDE.md` for details.
+- **Stale-looking sync timestamp**: `treasury.sync_status.updated_at` only bumps when new events arrive. A long delta does not mean the sync loop is dead. See `KI-SY-01`.
 
 ## License
 

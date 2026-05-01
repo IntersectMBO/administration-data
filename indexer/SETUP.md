@@ -7,7 +7,13 @@
 
 ## Download YACI Store JAR
 
-The YACI Store JAR file needs to be downloaded manually:
+> **For the standard Docker Compose setup (`./dev.sh start`), this section is
+> not needed.** `docker-compose.yml` runs the prebuilt
+> `bloxbean/yaci-store:2.0.0` image, which already bundles the JAR and
+> handles startup. Skip ahead to **Configuration**.
+
+The instructions below apply only if you are running the indexer outside
+Docker (e.g. directly on the host JVM):
 
 1. Visit https://github.com/bloxbean/yaci-store/releases
 2. Download the latest `yaci-store-all-*.jar` file (e.g., `yaci-store-all-2.0.0.jar`)

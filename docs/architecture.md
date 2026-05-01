@@ -176,6 +176,28 @@ This document describes how data flows through the Cardano Administration Data S
 
 ### Stage 3: API Sync Service (Rust)
 
+The background sync task (`api/src/services/sync.rs::run_sync_loop`) does
+three things every 15 seconds:
+
+1. Reads `treasury.sync_status` to find `last_slot` for `sync_type = 'events'`.
+2. Selects new label-`1694` rows from `yaci_store.transaction_metadata` past
+   that slot, plus a one-shot pre-fetch of their UTXOs into `treasury.utxos`
+   via `EventProcessor::pre_fetch_utxos`. The pre-fetch captures both the
+   tx's outputs and the inputs it spends, *before* YACI Store can prune
+   spent UTXOs (~2160 blocks / ~10 days). This is what makes pause/resume
+   datum parsing and chain tracing keep working long after the on-chain
+   UTXO is gone.
+3. Dispatches each event through the per-type handler and updates
+   `treasury.sync_status` to the highest successfully-processed slot.
+
+> **Caveat — `last_slot` advancement on errors.** If a single event fails
+> mid-batch (e.g. DB connection reset), the loop logs and continues; later
+> successful events advance `last_slot` past the failed one, so it is never
+> retried by the continuous loop. Restarting the API runs `sync_all_events`
+> from the beginning, which is idempotent (`ON CONFLICT (tx_hash) DO UPDATE`)
+> and recovers the missed rows. Tracked as
+> [`KI-SY-02`](known-issues.md#ki-sy-02--last_slot-can-advance-past-failed-events-on-connection-reset).
+
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                    BACKGROUND SYNC LOOP (every 15 seconds)                   │
@@ -192,6 +214,10 @@ This document describes how data flows through the Cardano Administration Data S
 │   │ def456  | 1050 | 1694  | {"body":{"event":"complete",...}}           │  │
 │   └──────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      │ pre_fetch_utxos(batch tx_hashes)
+                                      │ ──► treasury.utxos (raw output rows
+                                      │       captured before YACI prunes)
                                       │
                                       │ SELECT WHERE slot > last_synced_slot
                                       ▼
@@ -363,6 +389,26 @@ This document describes how data flows through the Cardano Administration Data S
    │      4. UPDATE milestones SET withdrawn=TRUE WHERE milestone_id='m1'   │
    └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+#### Disambiguation when a tx pulls inputs from multiple project chains
+
+A single milestone-level tx can include fee/collateral inputs from a sibling
+project's UTXO chain. `find_vendor_contract_from_inputs` collects every
+candidate `vendor_contract_id`, then scores each candidate by how many of the
+tx's metadata `body.milestones` keys (collected via
+`collect_milestone_id_hints`, `event_processor.rs:1450`) match milestones
+stored for that vendor contract. The best-scoring candidate wins; ties fall
+back to the first input.
+
+#### Cold replay — when chain tracing can't reconstruct the link
+
+If a fresh local sync starts from a `STORE_CARDANO_SYNC_START_SLOT` far behind
+tip, by the time the indexer is processing event N some of its input UTXOs
+from earlier events may already have been pruned by YACI Store. The chain
+trace returns `None`; the event is still recorded in `treasury.events` (with
+`vendor_contract_id = NULL`) so nothing is silently dropped, but milestone
+state flags can't be updated. See
+[`docs/known-issues.md` `KI-CR-01`](known-issues.md#ki-cr-01--fresh-local-sync-cant-reconstruct-fully-pruned-chains).
 
 ### Stage 6: API Request Flow
 

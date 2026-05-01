@@ -501,6 +501,50 @@ The API tracks the following Treasury Oversight Metadata (TOM) events:
 | `sweep` | Sweep remaining funds |
 | `reorganize` | Reorganize treasury funds |
 
+For per-event field mappings (which JSON path becomes which DB column) see
+[`docs/event-processing.md`](../docs/event-processing.md). For the catalog of
+known data-quality holes (NULL fields, on-chain inconsistencies, sync-loop
+quirks) see [`docs/known-issues.md`](../docs/known-issues.md).
+
+---
+
+## Event Processing Pipeline
+
+The API runs a background sync task (`api/src/services/sync.rs::run_sync_loop`)
+that drives event ingestion. The pipeline has four stages:
+
+1. **Pre-fetch UTXOs** — `EventProcessor::pre_fetch_utxos`
+   (`api/src/services/event_processor.rs:1209`) batches the tx_hashes of
+   pending TOM events and copies their outputs and inputs from
+   `yaci_store.address_utxo` into `treasury.utxos`. This captures UTXO data
+   before YACI Store can prune spent UTXOs (~2160 blocks / ~10 days).
+2. **Dispatch** — `process_event` (`event_processor.rs:82`) reads
+   `body.body.event` and delegates to a per-event handler. Treasury-level
+   events (`publish`, `initialize`, `disburse`, `sweep`, `reorganize`) write
+   to `treasury_contracts` + `events`; vendor-level events write to
+   `vendor_contracts` + `milestones` + `events`.
+3. **Vendor-contract resolution** — milestone-level events
+   (`complete`/`withdraw`/`pause`/`resume`) take their `vendor_contract_id`
+   from `body.identifier` when present, otherwise from
+   `find_vendor_contract_from_inputs` (`:1047`), which traces input UTXOs
+   back to the seed planted by the project's `fund` event. When multiple
+   project chains feed a single tx (sibling-project fee inputs, etc.) the
+   trace disambiguates by scoring candidate vendor_contracts against the
+   metadata's milestone keys (`collect_milestone_id_hints`, `:1450`).
+4. **Insert** — `insert_event_full` (`:999`) writes one row per
+   `tx_hash` into `treasury.events` with `ON CONFLICT (tx_hash) DO UPDATE`,
+   preserving idempotency. Events are recorded even when the chain trace
+   fails (`vendor_contract_id IS NULL`) so nothing is silently dropped.
+
+Datum parsing (milestone amounts, time limits, paused flags, vendor payment
+key hash) lives in `api/src/parsers/datum.rs`; address parsing
+(stake-credential extraction from bech32) lives in
+`api/src/parsers/address.rs`.
+
+For the SQL queries that surface where this pipeline produces NULLs in
+practice, see the repro queries in
+[`docs/known-issues.md`](../docs/known-issues.md).
+
 ---
 
 ## Error Responses
