@@ -2,11 +2,11 @@
 
 use axum::{
     extract::{Extension, Path, Query},
-    http::StatusCode,
     response::Json,
 };
 use sqlx::PgPool;
 
+use crate::errors::ApiError;
 use crate::models::v1::{
     ApiResponse, EventResponse, EventWithContextRow, EventsQuery, PaginatedResponse,
     RecentEventsQuery,
@@ -27,13 +27,12 @@ use crate::models::v1::{
 pub async fn list_events(
     Extension(pool): Extension<PgPool>,
     Query(params): Query<EventsQuery>,
-) -> Result<Json<PaginatedResponse<Vec<EventResponse>>>, StatusCode> {
+) -> Result<Json<PaginatedResponse<Vec<EventResponse>>>, ApiError> {
     let page = params.page.max(1);
     let limit = params.limit.min(100).max(1);
     let offset = ((page - 1) * limit) as i64;
     let limit_i64 = limit as i64;
 
-    // Build dynamic query based on filters
     let mut conditions = Vec::new();
     let mut bind_index = 1;
 
@@ -54,6 +53,15 @@ pub async fn list_events(
 
     if params.to_time.is_some() {
         conditions.push(format!("block_time <= ${}", bind_index));
+        bind_index += 1;
+    }
+
+    // Full-text search across reason, destination, and raw metadata.
+    if params.q.is_some() {
+        conditions.push(format!(
+            "(COALESCE(reason, '') ILIKE ${0} OR destination::text ILIKE ${0} OR metadata::text ILIKE ${0})",
+            bind_index
+        ));
         bind_index += 1;
     }
 
@@ -83,14 +91,11 @@ pub async fn list_events(
     if let Some(to_time) = params.to_time {
         count_q = count_q.bind(to_time);
     }
+    if let Some(ref q) = params.q {
+        count_q = count_q.bind(format!("%{}%", q));
+    }
 
-    let (total_count,) = count_q
-        .fetch_one(&pool)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database query error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let (total_count,) = count_q.fetch_one(&pool).await?;
 
     // Get data
     let data_query = format!(
@@ -120,16 +125,11 @@ pub async fn list_events(
     if let Some(to_time) = params.to_time {
         data_q = data_q.bind(to_time);
     }
+    if let Some(ref q) = params.q {
+        data_q = data_q.bind(format!("%{}%", q));
+    }
 
-    let rows = data_q
-        .bind(limit_i64)
-        .bind(offset)
-        .fetch_all(&pool)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database query error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let rows = data_q.bind(limit_i64).bind(offset).fetch_all(&pool).await?;
 
     let events: Vec<EventResponse> = rows.into_iter().map(EventResponse::from).collect();
     Ok(Json(PaginatedResponse::new(events, page, limit, total_count)))
@@ -150,7 +150,7 @@ pub async fn list_events(
 pub async fn get_recent_events(
     Extension(pool): Extension<PgPool>,
     Query(params): Query<RecentEventsQuery>,
-) -> Result<Json<ApiResponse<Vec<EventResponse>>>, StatusCode> {
+) -> Result<Json<ApiResponse<Vec<EventResponse>>>, ApiError> {
     let hours = params.hours.max(1).min(168); // Max 1 week
     let limit = params.limit.min(100).max(1) as i64;
 
@@ -189,10 +189,7 @@ pub async fn get_recent_events(
         .await
     };
 
-    let rows = rows.map_err(|e| {
-        tracing::error!("Database query error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let rows = rows?;
 
     let events: Vec<EventResponse> = rows.into_iter().map(EventResponse::from).collect();
     Ok(Json(ApiResponse::new(events)))
@@ -216,22 +213,18 @@ pub async fn get_recent_events(
 pub async fn get_event(
     Extension(pool): Extension<PgPool>,
     Path(tx_hash): Path<String>,
-) -> Result<Json<ApiResponse<EventResponse>>, StatusCode> {
+) -> Result<Json<ApiResponse<EventResponse>>, ApiError> {
     let row = sqlx::query_as::<_, EventWithContextRow>(
         r#"
         SELECT *
         FROM treasury.v_events_with_context
         WHERE tx_hash = $1
-        "#
+        "#,
     )
     .bind(&tx_hash)
     .fetch_optional(&pool)
-    .await
-    .map_err(|e| {
-        tracing::error!("Database query error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?
-    .ok_or(StatusCode::NOT_FOUND)?;
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("event `{}` not found", tx_hash)))?;
 
     Ok(Json(ApiResponse::new(EventResponse::from(row))))
 }

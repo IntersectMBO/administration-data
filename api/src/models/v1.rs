@@ -1,14 +1,18 @@
 //! V1 API Models with OpenAPI support
 //!
 //! These models follow the new API design with:
-//! - Amounts in lovelace (1 ADA = 1,000,000 lovelace)
+//! - Amounts in lovelace (1 ADA = 1,000,000 lovelace) — single source of truth
+//! - On-chain block times paired as `{unix, iso}` via [`crate::models::time::ChainTime`]
 //! - Raw metadata AND parsed/normalized data
 //! - Consistent response envelopes with pagination
+//! - Structured error envelope via [`crate::errors::ApiErrorBody`]
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use utoipa::{IntoParams, ToSchema};
+
+use crate::models::time::ChainTime;
 
 // ============================================================================
 // RESPONSE ENVELOPE
@@ -98,23 +102,69 @@ impl<T> PaginatedResponse<T> {
 // STATUS & HEALTH
 // ============================================================================
 
-/// API status response
+/// API status response.
+///
+/// Three time domains are surfaced separately:
+///
+/// - `database.checked_at` — server-side; when the response was generated.
+/// - `sync.heartbeat` — server-side; last time the API's TOM-sync loop ran.
+///   Bumps every poll regardless of whether new events arrived.
+/// - `sync.last_event_processed` — on-chain; block time of the most recent
+///   TOM event the API has written into `treasury.events`.
+/// - `chain.indexer_time` — on-chain; block time of the most recent block
+///   YACI Store has ingested. Tells you whether YACI is at tip.
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct StatusResponse {
     /// API version
     pub api_version: String,
-    /// Database connection status
-    pub database_connected: bool,
-    /// Last sync slot
-    pub last_sync_slot: Option<i64>,
-    /// Last sync block
-    pub last_sync_block: Option<i64>,
-    /// Last sync time (Unix timestamp)
-    pub last_sync_time: Option<i64>,
-    /// Total events processed
-    pub total_events: i64,
-    /// Total vendor contracts
-    pub total_vendor_contracts: i64,
+    /// Database health
+    pub database: DatabaseStatus,
+    /// API-side sync state
+    pub sync: SyncStatusBlock,
+    /// On-chain indexer state
+    pub chain: ChainStatus,
+    /// Top-level counts
+    pub totals: TotalsBlock,
+}
+
+/// Database health subsection
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct DatabaseStatus {
+    /// Whether the API can talk to Postgres
+    pub connected: bool,
+    /// When this status response was generated (server-side, ISO 8601)
+    pub checked_at: DateTime<Utc>,
+}
+
+/// API-side sync subsection
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct SyncStatusBlock {
+    /// Server-side timestamp of the last TOM-sync poll. Bumps every 15 s
+    /// regardless of whether new events arrived (KI-SY-01).
+    pub heartbeat: Option<DateTime<Utc>>,
+    /// On-chain block time of the most recent TOM event the API has
+    /// processed into `treasury.events`. Null if no events processed yet.
+    pub last_event_processed: Option<ChainTime>,
+}
+
+/// On-chain indexer subsection
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ChainStatus {
+    /// Block number the YACI Store indexer has reached (most recent block).
+    pub indexer_block: Option<i64>,
+    /// Slot the indexer has reached.
+    pub indexer_slot: Option<i64>,
+    /// On-chain block time of the indexer's most recent block.
+    pub indexer_time: Option<ChainTime>,
+}
+
+/// Top-level row counts
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct TotalsBlock {
+    pub events: i64,
+    pub vendor_contracts: i64,
+    /// Count of `treasury.events` rows by `event_type`.
+    pub events_by_type: std::collections::HashMap<String, i64>,
 }
 
 // ============================================================================
@@ -136,12 +186,12 @@ pub struct TreasuryResponse {
     pub status: Option<String>,
     /// Publish transaction hash
     pub publish_tx_hash: Option<String>,
-    /// Publish time (Unix timestamp)
-    pub publish_time: Option<i64>,
+    /// On-chain publish time (`{unix, iso}`)
+    pub publish_time: Option<ChainTime>,
     /// Initialize transaction hash
     pub initialized_tx_hash: Option<String>,
-    /// Initialize time (Unix timestamp)
-    pub initialized_at: Option<i64>,
+    /// On-chain initialize time (`{unix, iso}`)
+    pub initialized_at: Option<ChainTime>,
     /// Permission rules
     pub permissions: Option<serde_json::Value>,
     /// Statistics
@@ -169,8 +219,8 @@ pub struct TreasuryStatistics {
     pub total_events: i64,
     /// Current UTXO count
     pub utxo_count: i64,
-    /// Last event time (Unix timestamp)
-    pub last_event_time: Option<i64>,
+    /// Last event time (`{unix, iso}`)
+    pub last_event_time: Option<ChainTime>,
 }
 
 /// Treasury financial summary
@@ -215,9 +265,9 @@ impl From<TreasurySummaryRow> for TreasuryResponse {
             stake_credential: row.stake_credential,
             status: row.status,
             publish_tx_hash: row.publish_tx_hash,
-            publish_time: row.publish_time,
+            publish_time: ChainTime::maybe_from_secs(row.publish_time),
             initialized_tx_hash: row.initialized_tx_hash,
-            initialized_at: row.initialized_at,
+            initialized_at: ChainTime::maybe_from_secs(row.initialized_at),
             permissions: row.permissions,
             statistics: TreasuryStatistics {
                 vendor_contract_count: row.vendor_contract_count.unwrap_or(0),
@@ -226,7 +276,7 @@ impl From<TreasurySummaryRow> for TreasuryResponse {
                 cancelled_contracts: row.cancelled_contracts.unwrap_or(0),
                 total_events: row.total_events.unwrap_or(0),
                 utxo_count: row.utxo_count.unwrap_or(0),
-                last_event_time: row.last_event_time,
+                last_event_time: ChainTime::maybe_from_secs(row.last_event_time),
             },
             financials: TreasuryFinancials {
                 balance_lovelace: balance,
@@ -260,8 +310,8 @@ pub struct VendorContractSummary {
     pub status: Option<String>,
     /// Fund transaction hash
     pub fund_tx_hash: String,
-    /// Fund time (Unix timestamp)
-    pub fund_time: Option<i64>,
+    /// On-chain fund time (`{unix, iso}`)
+    pub fund_time: Option<ChainTime>,
     /// Initial allocated amount in lovelace
     pub initial_amount_lovelace: Option<i64>,
     /// Milestone summary
@@ -270,8 +320,8 @@ pub struct VendorContractSummary {
     pub financials: VendorFinancials,
     /// Treasury reference
     pub treasury: TreasuryReference,
-    /// Last event time (Unix timestamp)
-    pub last_event_time: Option<i64>,
+    /// Last event time (`{unix, iso}`)
+    pub last_event_time: Option<ChainTime>,
     /// Total event count
     pub event_count: Option<i64>,
 }
@@ -299,8 +349,8 @@ pub struct VendorContractDetail {
     pub status: Option<String>,
     /// Fund transaction hash
     pub fund_tx_hash: String,
-    /// Fund time (Unix timestamp)
-    pub fund_time: Option<i64>,
+    /// On-chain fund time (`{unix, iso}`)
+    pub fund_time: Option<ChainTime>,
     /// Initial allocated amount in lovelace
     pub initial_amount_lovelace: Option<i64>,
     /// Milestone summary
@@ -309,8 +359,8 @@ pub struct VendorContractDetail {
     pub financials: VendorFinancials,
     /// Treasury reference
     pub treasury: TreasuryReference,
-    /// Last event time (Unix timestamp)
-    pub last_event_time: Option<i64>,
+    /// Last event time (`{unix, iso}`)
+    pub last_event_time: Option<ChainTime>,
     /// Total event count
     pub event_count: Option<i64>,
     /// Record created at
@@ -408,7 +458,7 @@ impl From<VendorContractSummaryRow> for VendorContractSummary {
             contract_address: row.contract_address,
             status: row.status,
             fund_tx_hash: row.fund_tx_hash,
-            fund_time: row.fund_block_time,
+            fund_time: ChainTime::maybe_from_secs(row.fund_block_time),
             initial_amount_lovelace: row.initial_amount_lovelace,
             milestones_summary: MilestonesSummary {
                 total: row.total_milestones.unwrap_or(0),
@@ -427,7 +477,7 @@ impl From<VendorContractSummaryRow> for VendorContractSummary {
             treasury: TreasuryReference {
                 contract_instance: row.treasury_instance,
             },
-            last_event_time: row.last_event_time,
+            last_event_time: ChainTime::maybe_from_secs(row.last_event_time),
             event_count: row.event_count,
         }
     }
@@ -455,7 +505,7 @@ impl From<VendorContractSummaryRow> for VendorContractDetail {
             contract_address: row.contract_address,
             status: row.status,
             fund_tx_hash: row.fund_tx_hash,
-            fund_time: row.fund_block_time,
+            fund_time: ChainTime::maybe_from_secs(row.fund_block_time),
             initial_amount_lovelace: row.initial_amount_lovelace,
             milestones_summary: MilestonesSummary {
                 total: row.total_milestones.unwrap_or(0),
@@ -474,7 +524,7 @@ impl From<VendorContractSummaryRow> for VendorContractDetail {
             treasury: TreasuryReference {
                 contract_instance: row.treasury_instance,
             },
-            last_event_time: row.last_event_time,
+            last_event_time: ChainTime::maybe_from_secs(row.last_event_time),
             event_count: row.event_count,
             created_at: row.created_at,
             updated_at: row.updated_at,
@@ -528,8 +578,8 @@ pub struct MilestoneResponse {
 pub struct MilestoneCompletion {
     /// Completion transaction hash
     pub tx_hash: String,
-    /// Completion time (Unix timestamp)
-    pub time: Option<i64>,
+    /// On-chain completion time (`{unix, iso}`)
+    pub time: Option<ChainTime>,
     /// Completion description
     pub description: Option<String>,
     /// Evidence array
@@ -541,8 +591,8 @@ pub struct MilestoneCompletion {
 pub struct MilestoneWithdrawal {
     /// Withdrawal transaction hash
     pub tx_hash: String,
-    /// Withdrawal time (Unix timestamp)
-    pub time: Option<i64>,
+    /// On-chain withdrawal time (`{unix, iso}`)
+    pub time: Option<ChainTime>,
     /// Withdrawn amount in lovelace
     pub amount_lovelace: Option<i64>,
 }
@@ -552,8 +602,8 @@ pub struct MilestoneWithdrawal {
 pub struct MilestoneArchiveInfo {
     /// Transaction hash of the modify event that archived this milestone
     pub archived_by_tx_hash: Option<String>,
-    /// Time the milestone was archived
-    pub archived_at: Option<i64>,
+    /// On-chain archive time (`{unix, iso}`)
+    pub archived_at: Option<ChainTime>,
     /// ID of the new milestone that replaced this one
     pub superseded_by_id: Option<i32>,
 }
@@ -602,21 +652,21 @@ impl From<MilestoneRow> for MilestoneResponse {
     fn from(row: MilestoneRow) -> Self {
         let completion = row.complete_tx_hash.as_ref().map(|tx| MilestoneCompletion {
             tx_hash: tx.clone(),
-            time: row.complete_time,
+            time: ChainTime::maybe_from_secs(row.complete_time),
             description: row.complete_description.clone(),
             evidence: row.evidence.clone(),
         });
 
         let withdrawal = row.withdraw_tx_hash.as_ref().map(|tx| MilestoneWithdrawal {
             tx_hash: tx.clone(),
-            time: row.withdraw_time,
+            time: ChainTime::maybe_from_secs(row.withdraw_time),
             amount_lovelace: row.withdraw_amount,
         });
 
         let archive_info = if row.archived {
             Some(MilestoneArchiveInfo {
                 archived_by_tx_hash: row.archived_by_tx_hash,
-                archived_at: row.archived_at,
+                archived_at: ChainTime::maybe_from_secs(row.archived_at),
                 superseded_by_id: row.superseded_by,
             })
         } else {
@@ -662,21 +712,23 @@ pub struct EventResponse {
     pub slot: Option<i64>,
     /// Block number
     pub block_number: Option<i64>,
-    /// Block time (Unix timestamp)
-    pub block_time: Option<i64>,
-    /// Event type (publish/initialize/fund/complete/disburse/etc.)
+    /// On-chain block time (`{unix, iso}`)
+    pub block_time: Option<ChainTime>,
+    /// Event type (publish/initialize/fund/complete/disburse/withdraw/pause/resume/modify/cancel/sweep/reorganize)
     pub event_type: String,
-    /// Amount in lovelace (if applicable)
+    /// Amount in lovelace. Set on `fund` and `withdraw` events; null otherwise.
     pub amount_lovelace: Option<i64>,
-    /// Reason (for pause/cancel/modify events)
+    /// Justification text. Set on `pause`, `cancel`, `modify` events; null otherwise.
     pub reason: Option<String>,
-    /// Destination (for disburse events) — TOM `{label, details}` object preserved as-is.
+    /// TOM `{label, details}` object preserved as-is. Set on `disburse` events only.
     pub destination: Option<serde_json::Value>,
-    /// Treasury context
+    /// Treasury context. Populated for treasury-level events
+    /// (`publish`, `initialize`, `disburse`, `sweep`, `reorganize`); null on vendor-level events.
     pub treasury: Option<EventTreasuryContext>,
-    /// Project context
+    /// Project context. Populated for vendor-level events; null on treasury-level events.
     pub project: Option<EventProjectContext>,
-    /// Milestone context
+    /// Milestone context. Populated when the event resolves to a specific milestone
+    /// (typically `complete`, `withdraw`); null otherwise.
     pub milestone: Option<EventMilestoneContext>,
     /// Raw metadata
     pub metadata_raw: Option<serde_json::Value>,
@@ -759,7 +811,7 @@ impl From<EventWithContextRow> for EventResponse {
             tx_hash: row.tx_hash,
             slot: row.slot,
             block_number: row.block_number,
-            block_time: row.block_time,
+            block_time: ChainTime::maybe_from_secs(row.block_time),
             event_type: row.event_type,
             amount_lovelace: row.amount_lovelace,
             reason: row.reason,
@@ -963,6 +1015,8 @@ pub struct EventsQuery {
     pub from_time: Option<i64>,
     /// Filter by time (Unix timestamp, to)
     pub to_time: Option<i64>,
+    /// Full-text search across `reason`, `destination`, and raw `metadata` (case-insensitive substring match).
+    pub q: Option<String>,
 }
 
 /// Recent events query parameters
@@ -1000,6 +1054,11 @@ pub struct MilestonesQuery {
     pub project_id: Option<String>,
     /// Sort field (milestone_order, complete_time, withdraw_time)
     pub sort: Option<String>,
+    /// Filter by milestone time (Unix timestamp, from). Matches whichever of
+    /// `complete_time` or `withdraw_time` is set on the milestone.
+    pub from_time: Option<i64>,
+    /// Filter by milestone time (Unix timestamp, to).
+    pub to_time: Option<i64>,
 }
 
 /// Project events query parameters
@@ -1014,4 +1073,15 @@ pub struct ProjectEventsQuery {
     /// Filter by event type
     #[serde(rename = "type")]
     pub event_type: Option<String>,
+}
+
+/// Generic pagination query (used by sub-list endpoints that don't need other filters).
+#[derive(Debug, Deserialize, ToSchema, IntoParams)]
+pub struct PaginationQuery {
+    /// Page number (1-indexed)
+    #[serde(default = "default_page")]
+    pub page: u32,
+    /// Items per page (max 100)
+    #[serde(default = "default_limit")]
+    pub limit: u32,
 }

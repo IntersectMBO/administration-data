@@ -17,6 +17,7 @@ fn env_u16(key: &str, default: u16) -> u16 {
         .unwrap_or(default)
 }
 
+mod errors;
 mod models;
 mod openapi;
 mod parsers;

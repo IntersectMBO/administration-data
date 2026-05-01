@@ -3,13 +3,15 @@
 use utoipa::OpenApi;
 
 use crate::models::v1::{
-    ApiResponse, EventMilestoneContext, EventProjectContext, EventResponse, EventStats,
-    EventTreasuryContext, EventsQuery, FinancialStats, MilestoneArchiveInfo, MilestoneCompletion, MilestoneWithdrawal,
-    MilestoneResponse, MilestoneStats, MilestonesSummary, MilestonesQuery, PaginatedResponse,
-    Pagination, ProjectEventsQuery, ProjectReference, ProjectStats, RecentEventsQuery,
-    ResponseMeta, StatisticsResponse, StatusResponse, SyncStats, TreasuryFinancials,
-    TreasuryReference, TreasuryResponse, TreasuryStatistics, TreasuryStats, UtxoResponse,
-    VendorContractDetail, VendorContractSummary, VendorContractsQuery, VendorFinancials,
+    ApiResponse, ChainStatus, DatabaseStatus, EventMilestoneContext, EventProjectContext,
+    EventResponse, EventStats, EventTreasuryContext, EventsQuery, FinancialStats,
+    MilestoneArchiveInfo, MilestoneCompletion, MilestoneWithdrawal, MilestoneResponse,
+    MilestoneStats, MilestonesSummary, MilestonesQuery, PaginatedResponse, Pagination,
+    PaginationQuery, ProjectEventsQuery, ProjectReference, ProjectStats, RecentEventsQuery,
+    ResponseMeta, StatisticsResponse, StatusResponse, SyncStats, SyncStatusBlock, TotalsBlock,
+    TreasuryFinancials, TreasuryReference, TreasuryResponse, TreasuryStatistics, TreasuryStats,
+    UtxoResponse, VendorContractDetail, VendorContractSummary, VendorContractsQuery,
+    VendorFinancials,
 };
 
 use crate::routes::v1::{
@@ -20,8 +22,8 @@ use crate::routes::v1::{
 #[openapi(
     info(
         title = "Cardano Administration API",
-        version = "1.0.0",
-        description = "REST API for tracking Cardano treasury contracts and fund disbursements.\n\n## Overview\n\nThis API provides access to treasury contract data, vendor contracts (projects), milestones, and event history for the Cardano treasury system.\n\n## Key Concepts\n\n- **Treasury Contract (TRSC)**: The root treasury reserve contract that holds funds\n- **Vendor Contract (PSSC)**: Project-specific contracts that receive funding from the treasury\n- **Milestone**: Individual deliverables within a vendor contract\n- **Event**: Audit log of all treasury operations (fund, complete, disburse, etc.)\n\n## Response Format\n\nAll responses use a consistent envelope format:\n\n```json\n{\n  \"data\": { ... },\n  \"pagination\": { ... },  // Only for paginated endpoints\n  \"meta\": {\n    \"timestamp\": \"2026-01-28T10:30:00Z\"\n  }\n}\n```\n\n## Amounts\n\nAll monetary amounts are provided in both lovelace (smallest unit) and ADA:\n- `amount_lovelace`: Integer amount in lovelace\n- `amount_ada`: Float amount in ADA (1 ADA = 1,000,000 lovelace)",
+        version = "1.1.0",
+        description = "REST API for tracking Cardano treasury contracts and fund disbursements.\n\n## Overview\n\nThis API provides access to treasury contract data, vendor contracts (projects), milestones, and event history for the Cardano treasury system.\n\n## Key Concepts\n\n- **Treasury Contract (TRSC)**: The root treasury reserve contract that holds funds\n- **Vendor Contract (PSSC)**: Project-specific contracts that receive funding from the treasury\n- **Milestone**: Individual deliverables within a vendor contract\n- **Event**: Audit log of all treasury operations (fund, complete, disburse, etc.)\n\n## Response Format\n\nAll responses use a consistent envelope:\n\n```json\n{\n  \"data\": { ... },\n  \"pagination\": { ... },   // present on paginated endpoints\n  \"meta\":  { \"timestamp\": \"2026-05-01T10:30:00Z\" }\n}\n```\n\nErrors use a parallel envelope:\n\n```json\n{\n  \"error\": { \"code\": \"not_found\", \"message\": \"…\", \"details\": {…}? },\n  \"meta\":  { \"timestamp\": \"2026-05-01T10:30:00Z\" }\n}\n```\n\n## Amounts\n\nAll monetary amounts are in **lovelace** (the smallest unit; 1 ADA = 1,000,000 lovelace). Clients are responsible for ADA formatting.\n\n## Timestamps\n\nOn-chain block times are returned as a paired object: `{\"unix\": 1777609469, \"iso\": \"2025-09-29T12:24:29Z\"}`. Server-side timestamps (`created_at`, `updated_at`) are ISO 8601 strings.",
         license(
             name = "Apache 2.0",
             url = "https://www.apache.org/licenses/LICENSE-2.0"
@@ -108,12 +110,22 @@ use crate::routes::v1::{
             SyncStats,
             // Status
             StatusResponse,
+            DatabaseStatus,
+            SyncStatusBlock,
+            ChainStatus,
+            TotalsBlock,
+            // Errors
+            crate::errors::ApiErrorBody,
+            crate::errors::ApiErrorDetail,
+            // Time
+            crate::models::time::ChainTime,
             // Query params
             VendorContractsQuery,
             EventsQuery,
             RecentEventsQuery,
             MilestonesQuery,
             ProjectEventsQuery,
+            PaginationQuery,
         )
     )
 )]

@@ -1,9 +1,10 @@
 //! Statistics endpoint
 
-use axum::{extract::Extension, http::StatusCode, response::Json};
+use axum::{extract::Extension, response::Json};
 use sqlx::PgPool;
 use std::collections::HashMap;
 
+use crate::errors::ApiError;
 use crate::models::v1::{
     ApiResponse, EventStats, FinancialStats, MilestoneStats, ProjectStats,
     StatisticsResponse, SyncStats, TreasuryStats,
@@ -22,7 +23,7 @@ use crate::models::v1::{
 )]
 pub async fn get_statistics(
     Extension(pool): Extension<PgPool>,
-) -> Result<Json<ApiResponse<StatisticsResponse>>, StatusCode> {
+) -> Result<Json<ApiResponse<StatisticsResponse>>, ApiError> {
     // Treasury stats
     let treasury_stats = get_treasury_stats(&pool).await?;
 
@@ -51,7 +52,7 @@ pub async fn get_statistics(
     })))
 }
 
-async fn get_treasury_stats(pool: &PgPool) -> Result<TreasuryStats, StatusCode> {
+async fn get_treasury_stats(pool: &PgPool) -> Result<TreasuryStats, ApiError> {
     let row = sqlx::query_as::<_, (i64, i64)>(
         r#"
         SELECT
@@ -62,10 +63,7 @@ async fn get_treasury_stats(pool: &PgPool) -> Result<TreasuryStats, StatusCode> 
     )
     .fetch_one(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database query error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    ?;
 
     // Get disbursement count from events
     let (disbursed_count,): (i64,) = sqlx::query_as(
@@ -73,10 +71,7 @@ async fn get_treasury_stats(pool: &PgPool) -> Result<TreasuryStats, StatusCode> 
     )
     .fetch_one(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database query error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    ?;
 
     Ok(TreasuryStats {
         total_count: row.0,
@@ -85,7 +80,7 @@ async fn get_treasury_stats(pool: &PgPool) -> Result<TreasuryStats, StatusCode> 
     })
 }
 
-async fn get_project_stats(pool: &PgPool) -> Result<ProjectStats, StatusCode> {
+async fn get_project_stats(pool: &PgPool) -> Result<ProjectStats, ApiError> {
     let row = sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(
         r#"
         SELECT
@@ -99,10 +94,7 @@ async fn get_project_stats(pool: &PgPool) -> Result<ProjectStats, StatusCode> {
     )
     .fetch_one(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database query error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    ?;
 
     Ok(ProjectStats {
         total_count: row.0,
@@ -113,7 +105,7 @@ async fn get_project_stats(pool: &PgPool) -> Result<ProjectStats, StatusCode> {
     })
 }
 
-async fn get_milestone_stats(pool: &PgPool) -> Result<MilestoneStats, StatusCode> {
+async fn get_milestone_stats(pool: &PgPool) -> Result<MilestoneStats, ApiError> {
     let row = sqlx::query_as::<_, (i64, i64, i64, i64)>(
         r#"
         SELECT
@@ -126,10 +118,7 @@ async fn get_milestone_stats(pool: &PgPool) -> Result<MilestoneStats, StatusCode
     )
     .fetch_one(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database query error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    ?;
 
     Ok(MilestoneStats {
         total_count: row.0,
@@ -139,15 +128,12 @@ async fn get_milestone_stats(pool: &PgPool) -> Result<MilestoneStats, StatusCode
     })
 }
 
-async fn get_event_stats(pool: &PgPool) -> Result<EventStats, StatusCode> {
+async fn get_event_stats(pool: &PgPool) -> Result<EventStats, ApiError> {
     // Get processed event count
     let (processed_count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM treasury.events")
         .fetch_one(pool)
         .await
-        .map_err(|e| {
-            tracing::error!("Database query error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        ?;
 
     // Get on-chain TOM event count and breakdown by type from yaci_store.
     // Event type lives at body.body.event in the metadata (see event_processor::process_event).
@@ -164,10 +150,7 @@ async fn get_event_stats(pool: &PgPool) -> Result<EventStats, StatusCode> {
     )
     .fetch_all(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database query error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    ?;
 
     let on_chain_count: i64 = on_chain_rows.iter().map(|(_, c)| c).sum();
     let by_type: HashMap<String, i64> = on_chain_rows.into_iter().collect();
@@ -179,17 +162,14 @@ async fn get_event_stats(pool: &PgPool) -> Result<EventStats, StatusCode> {
     })
 }
 
-async fn get_financial_stats(pool: &PgPool) -> Result<FinancialStats, StatusCode> {
+async fn get_financial_stats(pool: &PgPool) -> Result<FinancialStats, ApiError> {
     // Get total allocated (sum of initial amounts)
     let (total_allocated,): (Option<i64>,) = sqlx::query_as(
         "SELECT COALESCE(SUM(initial_amount_lovelace), 0)::BIGINT FROM treasury.vendor_contracts"
     )
     .fetch_one(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database query error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    ?;
 
     // Get total withdrawn
     let (total_withdrawn,): (Option<i64>,) = sqlx::query_as(
@@ -197,10 +177,7 @@ async fn get_financial_stats(pool: &PgPool) -> Result<FinancialStats, StatusCode
     )
     .fetch_one(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database query error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    ?;
 
     // Get current balance (unspent UTXOs)
     let (current_balance,): (Option<i64>,) = sqlx::query_as(
@@ -208,10 +185,7 @@ async fn get_financial_stats(pool: &PgPool) -> Result<FinancialStats, StatusCode
     )
     .fetch_one(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database query error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    ?;
 
     let allocated = total_allocated.unwrap_or(0);
     let withdrawn = total_withdrawn.unwrap_or(0);
@@ -224,16 +198,13 @@ async fn get_financial_stats(pool: &PgPool) -> Result<FinancialStats, StatusCode
     })
 }
 
-async fn get_sync_stats(pool: &PgPool) -> Result<SyncStats, StatusCode> {
+async fn get_sync_stats(pool: &PgPool) -> Result<SyncStats, ApiError> {
     let row = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<chrono::DateTime<chrono::Utc>>)>(
         "SELECT last_slot, last_block, updated_at FROM treasury.sync_status WHERE sync_type = 'events'"
     )
     .fetch_optional(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database query error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    ?;
 
     match row {
         Some((last_slot, last_block, updated_at)) => Ok(SyncStats {

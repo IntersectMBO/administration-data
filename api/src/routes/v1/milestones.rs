@@ -2,11 +2,11 @@
 
 use axum::{
     extract::{Extension, Path, Query},
-    http::StatusCode,
     response::Json,
 };
 use sqlx::PgPool;
 
+use crate::errors::ApiError;
 use crate::models::v1::{
     ApiResponse, MilestoneResponse, MilestoneRow, MilestonesQuery, PaginatedResponse,
 };
@@ -26,7 +26,7 @@ use crate::models::v1::{
 pub async fn list_milestones(
     Extension(pool): Extension<PgPool>,
     Query(params): Query<MilestonesQuery>,
-) -> Result<Json<PaginatedResponse<Vec<MilestoneResponse>>>, StatusCode> {
+) -> Result<Json<PaginatedResponse<Vec<MilestoneResponse>>>, ApiError> {
     let page = params.page.max(1);
     let limit = params.limit.min(100).max(1);
     let offset = ((page - 1) * limit) as i64;
@@ -57,6 +57,24 @@ pub async fn list_milestones(
 
     if params.project_id.is_some() {
         conditions.push(format!("vc.project_id = ${}", bind_index));
+        bind_index += 1;
+    }
+
+    // KI: time-range filter on milestones, matching whichever of complete_time
+    // or withdraw_time is set on the row.
+    if params.from_time.is_some() {
+        conditions.push(format!(
+            "(m.complete_time >= ${0} OR m.withdraw_time >= ${0})",
+            bind_index
+        ));
+        bind_index += 1;
+    }
+
+    if params.to_time.is_some() {
+        conditions.push(format!(
+            "(m.complete_time <= ${0} OR m.withdraw_time <= ${0})",
+            bind_index
+        ));
         bind_index += 1;
     }
 
@@ -99,14 +117,14 @@ pub async fn list_milestones(
     if let Some(ref project_id) = params.project_id {
         count_q = count_q.bind(project_id);
     }
+    if let Some(from_time) = params.from_time {
+        count_q = count_q.bind(from_time);
+    }
+    if let Some(to_time) = params.to_time {
+        count_q = count_q.bind(to_time);
+    }
 
-    let (total_count,) = count_q
-        .fetch_one(&pool)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database query error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let (total_count,) = count_q.fetch_one(&pool).await?;
 
     // Get data
     let data_query = format!(
@@ -163,16 +181,14 @@ pub async fn list_milestones(
     if let Some(ref project_id) = params.project_id {
         data_q = data_q.bind(project_id);
     }
+    if let Some(from_time) = params.from_time {
+        data_q = data_q.bind(from_time);
+    }
+    if let Some(to_time) = params.to_time {
+        data_q = data_q.bind(to_time);
+    }
 
-    let rows = data_q
-        .bind(limit_i64)
-        .bind(offset)
-        .fetch_all(&pool)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database query error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let rows = data_q.bind(limit_i64).bind(offset).fetch_all(&pool).await?;
 
     let milestones: Vec<MilestoneResponse> = rows.into_iter().map(MilestoneResponse::from).collect();
     Ok(Json(PaginatedResponse::new(milestones, page, limit, total_count)))
@@ -196,7 +212,7 @@ pub async fn list_milestones(
 pub async fn get_milestone(
     Extension(pool): Extension<PgPool>,
     Path(id): Path<i32>,
-) -> Result<Json<ApiResponse<MilestoneResponse>>, StatusCode> {
+) -> Result<Json<ApiResponse<MilestoneResponse>>, ApiError> {
     let row = sqlx::query_as::<_, MilestoneRow>(
         r#"
         SELECT
@@ -232,12 +248,8 @@ pub async fn get_milestone(
     )
     .bind(id)
     .fetch_optional(&pool)
-    .await
-    .map_err(|e| {
-        tracing::error!("Database query error: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?
-    .ok_or(StatusCode::NOT_FOUND)?;
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("milestone `{}` not found", id)))?;
 
     Ok(Json(ApiResponse::new(MilestoneResponse::from(row))))
 }
