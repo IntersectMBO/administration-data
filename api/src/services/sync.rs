@@ -53,7 +53,27 @@ pub async fn run_sync_loop(pool: PgPool) {
 
     tracing::info!("Initial sync complete. Starting continuous sync loop.");
 
-    // Continuous sync loop
+    // Periodic full re-sync (every 10 minutes) as a belt-and-braces safety net
+    // for KI-VND-01 / KI-MIL-01 / KI-EVT-01-residual / KI-SY-02. The cold-resync
+    // race that leaves UTXO-* fund datums NULL on first pass is invisible to the
+    // 15s incremental loop because it never re-visits already-processed slots;
+    // sync_all_events re-runs every fund event and the idempotent
+    // ON CONFLICT DO UPDATE chain backfills missing fields.
+    let pool_for_full_sync = pool.clone();
+    tokio::spawn(async move {
+        let processor = EventProcessor::new(pool_for_full_sync);
+        // First periodic run after a short delay so we don't double up with
+        // the initial sync above.
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        loop {
+            if let Err(e) = processor.sync_all_events().await {
+                tracing::error!("Periodic full-sync failed (non-fatal): {}", e);
+            }
+            tokio::time::sleep(Duration::from_secs(600)).await;
+        }
+    });
+
+    // Continuous sync loop (15s incremental)
     loop {
         tokio::time::sleep(Duration::from_secs(15)).await;
 
@@ -113,19 +133,36 @@ async fn sync_new_events(pool: &PgPool, processor: &EventProcessor) -> anyhow::R
         tracing::warn!("UTXO pre-fetch failed (non-fatal): {}", e);
     }
 
+    // Track the watermark as the slot of the LAST CONTIGUOUSLY-SUCCESSFUL row.
+    // If a row fails, every later row in this batch — even successful ones —
+    // does NOT advance the watermark, so retry on the next tick will revisit
+    // them. Closes KI-SY-02: previously a later success bumped the watermark
+    // past a failed earlier row, silently losing it.
+    //
+    // Cost: a permanently-failing event wedges the loop at its slot until an
+    // operator fixes it. That's intentional — visible stall beats silent loss.
     let mut last_processed_slot = last_slot;
     let mut last_processed_tx = String::new();
     let mut last_block = 0i64;
+    let mut hole_seen = false;
 
     for row in rows {
-        if let Err(e) = processor.process_event(&row).await {
-            tracing::error!("Failed to process event {}: {}", row.tx_hash, e);
-            continue;
+        match processor.process_event(&row).await {
+            Err(e) => {
+                tracing::error!(
+                    "Failed to process event {} at slot {:?}: {:#}",
+                    row.tx_hash, row.slot, e
+                );
+                hole_seen = true;
+            }
+            Ok(()) => {
+                if !hole_seen {
+                    last_processed_slot = row.slot.unwrap_or(last_processed_slot);
+                    last_block = row.block_number.unwrap_or(last_block);
+                    last_processed_tx = row.tx_hash.clone();
+                }
+            }
         }
-
-        last_processed_slot = row.slot.unwrap_or(last_processed_slot);
-        last_block = row.block_number.unwrap_or(last_block);
-        last_processed_tx = row.tx_hash.clone();
     }
 
     // Update sync status

@@ -18,13 +18,24 @@
 use anyhow::{anyhow, Context};
 use pallas_primitives::alonzo::{BigInt, PlutusData};
 
-/// Parsed vendor contract datum
+/// Parsed vendor contract datum.
+///
+/// Partial: each section may independently succeed or fail. The call site
+/// persists what's `Ok` and writes the error string to `datum_parse_error`
+/// for the relevant row, so failures are queryable in SQL rather than
+/// scraped from logs.
 #[derive(Debug, Clone)]
 pub struct ParsedProjectDatum {
-    /// Vendor payment key hash (hex)
-    pub vendor_payment_key_hash: String,
-    /// Per-milestone data from datum
-    pub milestones: Vec<ParsedMilestoneDatum>,
+    /// Vendor payment key hash (hex). `None` means vendor-info section
+    /// failed to parse — see `vendor_info_error`.
+    pub vendor_payment_key_hash: Option<String>,
+    /// Error message if vendor-info section couldn't be parsed.
+    pub vendor_info_error: Option<String>,
+    /// Per-milestone results. `Ok` rows update the milestone row;
+    /// `Err` rows record the error in `treasury.milestones.datum_parse_error`.
+    pub milestones: Vec<Result<ParsedMilestoneDatum, String>>,
+    /// Top-level CBOR / shape error. When set, every other field is empty.
+    pub top_level_error: Option<String>,
 }
 
 /// Parsed milestone data from inline datum
@@ -53,18 +64,39 @@ pub struct ParsedMilestoneDatum {
 ///    storage in the single `vendor_payment_key_hash` column.
 ///
 /// The milestones array structure is identical between the two formats.
-pub fn parse_project_datum(cbor_hex: &str) -> anyhow::Result<ParsedProjectDatum> {
-    let bytes = hex::decode(cbor_hex).context("invalid hex in datum")?;
-    let datum: PlutusData =
-        pallas_codec::minicbor::decode(&bytes).context("failed to decode CBOR datum")?;
+///
+/// Returns a partial result: a top-level CBOR/shape error short-circuits
+/// the whole datum, otherwise vendor info and each milestone parse
+/// independently so a single bad milestone doesn't lose the rest.
+pub fn parse_project_datum(cbor_hex: &str) -> ParsedProjectDatum {
+    let mut out = ParsedProjectDatum {
+        vendor_payment_key_hash: None,
+        vendor_info_error: None,
+        milestones: Vec::new(),
+        top_level_error: None,
+    };
+
+    let bytes = match hex::decode(cbor_hex).context("invalid hex in datum") {
+        Ok(b) => b,
+        Err(e) => { out.top_level_error = Some(format!("{:#}", e)); return out; }
+    };
+    let datum: PlutusData = match pallas_codec::minicbor::decode(&bytes)
+        .context("failed to decode CBOR datum") {
+        Ok(d) => d,
+        Err(e) => { out.top_level_error = Some(format!("{:#}", e)); return out; }
+    };
 
     // Top-level: Constr(0, [vendor_info, milestones_array])
-    let top_fields = expect_constr(&datum, 0, "top-level datum")?;
+    let top_fields = match expect_constr(&datum, 0, "top-level datum") {
+        Ok(f) => f,
+        Err(e) => { out.top_level_error = Some(format!("{:#}", e)); return out; }
+    };
     if top_fields.len() < 2 {
-        return Err(anyhow!(
+        out.top_level_error = Some(format!(
             "top-level datum has {} fields, expected 2",
             top_fields.len()
         ));
+        return out;
     }
 
     // Field 0: vendor info. Walk the subtree and collect every 28-byte
@@ -72,24 +104,30 @@ pub fn parse_project_datum(cbor_hex: &str) -> anyhow::Result<ParsedProjectDatum>
     let mut hashes: Vec<String> = Vec::new();
     collect_key_hashes(&top_fields[0], &mut hashes);
     if hashes.is_empty() {
-        return Err(anyhow!("no 28-byte key hash found in vendor info"));
+        out.vendor_info_error = Some("no 28-byte key hash found in vendor info".to_string());
+    } else {
+        out.vendor_payment_key_hash = Some(hashes.join(","));
     }
-    let vendor_payment_key_hash = hashes.join(",");
 
     // Field 1: Array of milestone Constrs
-    let milestone_data_list = expect_array(&top_fields[1], "milestones array")?;
-
-    let mut milestones = Vec::with_capacity(milestone_data_list.len());
-    for (idx, ms_datum) in milestone_data_list.iter().enumerate() {
-        let ms = parse_milestone_datum(ms_datum, idx)
-            .with_context(|| format!("milestone {}", idx))?;
-        milestones.push(ms);
+    match expect_array(&top_fields[1], "milestones array") {
+        Ok(milestone_data_list) => {
+            out.milestones.reserve(milestone_data_list.len());
+            for (idx, ms_datum) in milestone_data_list.iter().enumerate() {
+                let r = parse_milestone_datum(ms_datum, idx)
+                    .with_context(|| format!("milestone {}", idx))
+                    .map_err(|e| format!("{:#}", e));
+                out.milestones.push(r);
+            }
+        }
+        Err(e) => {
+            // Surface as a top-level error so the call site doesn't silently
+            // skip the milestones UPDATE loop.
+            out.top_level_error = Some(format!("{:#}", e));
+        }
     }
 
-    Ok(ParsedProjectDatum {
-        vendor_payment_key_hash,
-        milestones,
-    })
+    out
 }
 
 /// Parse a single milestone datum: Constr(0, [BigInt(time_limit), Map(value), Constr(0|1, [])])
@@ -297,17 +335,83 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_empty_hex_fails() {
-        assert!(parse_project_datum("").is_err());
+    fn test_parse_empty_hex_returns_top_level_error() {
+        let r = parse_project_datum("");
+        assert!(r.top_level_error.is_some());
+        assert!(r.vendor_payment_key_hash.is_none());
+        assert!(r.milestones.is_empty());
     }
 
     #[test]
-    fn test_parse_invalid_hex_fails() {
-        assert!(parse_project_datum("zzzz").is_err());
+    fn test_parse_invalid_hex_returns_top_level_error() {
+        let r = parse_project_datum("zzzz");
+        assert!(r.top_level_error.is_some());
     }
 
     #[test]
-    fn test_parse_invalid_cbor_fails() {
-        assert!(parse_project_datum("deadbeef").is_err());
+    fn test_parse_invalid_cbor_returns_top_level_error() {
+        let r = parse_project_datum("deadbeef");
+        assert!(r.top_level_error.is_some());
+    }
+
+    #[test]
+    fn test_utxo_emi_0001_25_fixture_parses() {
+        // Real on-chain datum from project UTXO-EMI-0001-25
+        // (tx 5849b0ec727e062ef2ee29076f0f5fcc72206081f40c2dc9cba604bca93c9e3c, output 0).
+        // Multi-key vendor info (Constr(1, [Array([Constr(0, [bytes28]), Constr(N, [bytes28])])])).
+        let hex = include_str!("../../tests/fixtures/utxo_emi_0001_25.hex").trim();
+        let r = parse_project_datum(hex);
+        assert!(r.top_level_error.is_none(), "top-level error: {:?}", r.top_level_error);
+        assert!(r.vendor_info_error.is_none(), "vendor info error: {:?}", r.vendor_info_error);
+        let kh = r.vendor_payment_key_hash.expect("key hash");
+        assert!(kh.contains(','), "expected multi-key (comma-joined), got {}", kh);
+        assert_eq!(r.milestones.len(), 5, "expected 5 milestones");
+        for (i, m) in r.milestones.iter().enumerate() {
+            assert!(m.is_ok(), "milestone {} failed: {:?}", i, m);
+        }
+    }
+
+    #[test]
+    fn test_utxo_ec_0002_25_01_fixture_parses() {
+        // 16-milestone fund datum from UTXO-EC-0002-25-01 (largest variant).
+        let hex = include_str!("../../tests/fixtures/utxo_ec_0002_25_01.hex").trim();
+        let r = parse_project_datum(hex);
+        assert!(r.top_level_error.is_none(), "top-level error: {:?}", r.top_level_error);
+        assert!(r.vendor_payment_key_hash.is_some());
+        assert_eq!(r.milestones.len(), 16);
+        assert!(r.milestones.iter().all(|m| m.is_ok()));
+    }
+
+    #[test]
+    fn test_partial_parse_keeps_vendor_info_when_milestones_fail() {
+        // Hand-crafted datum: valid vendor info, milestones array contains a
+        // bogus milestone (tag 199 instead of 121). The partial parser should
+        // still surface the vendor key hash.
+        // Constr(0, [
+        //   Constr(0, [bytes(28)]),                 // vendor_info: single-key
+        //   [Constr(199, [])]                       // milestones with one bad entry
+        // ])
+        // tag 199 is not a valid Plutus constructor, so milestone parsing
+        // returns Err for that entry but the vendor info is still extracted.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0xd8, 0x79, 0x9f]); // Constr(0, [
+        bytes.extend_from_slice(&[0xd8, 0x79, 0x9f]); //   Constr(0, [
+        bytes.push(0x58); bytes.push(28);              //     bytes(28)
+        bytes.extend_from_slice(&[0xaa; 28]);
+        bytes.push(0xff);                              //   ])
+        bytes.push(0x9f);                              //   [
+        bytes.extend_from_slice(&[0xd9, 0x05, 0x06]); //     tag 1286 (constructor 6 in extended range)
+        bytes.push(0x80);                              //     []
+        bytes.push(0xff);                              //   ]
+        bytes.push(0xff);                              // ])
+
+        let hex = hex::encode(&bytes);
+        let r = parse_project_datum(&hex);
+        // Vendor info should succeed even though the milestone is malformed.
+        assert_eq!(
+            r.vendor_payment_key_hash.as_deref(),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert!(r.vendor_info_error.is_none());
     }
 }

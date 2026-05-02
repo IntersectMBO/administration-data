@@ -455,36 +455,67 @@ impl EventProcessor {
             }
         }
 
-        // Parse inline datum for milestone amounts, time_limits, and vendor_payment_key_hash
-        // Uses the datum already fetched by get_script_utxo_for_tx (with pruning fallback)
+        // Parse inline datum for milestone amounts, time_limits, and vendor_payment_key_hash.
+        // Uses the datum already fetched by get_script_utxo_for_tx (with pruning fallback).
+        //
+        // The parser is partial — vendor info and each milestone parse independently.
+        // We persist whatever is Ok and stash any error string in `datum_parse_error`
+        // so failures are queryable in SQL.
         if let Some(datum_hex) = fund_inline_datum {
-            match crate::parsers::datum::parse_project_datum(&datum_hex) {
-                Ok(parsed) => {
-                    // Store vendor_payment_key_hash
-                    sqlx::query(
-                        "UPDATE treasury.projects SET vendor_payment_key_hash = $1 WHERE id = $2"
-                    )
-                    .bind(&parsed.vendor_payment_key_hash)
-                    .bind(project_db_id)
-                    .execute(&self.pool)
-                    .await?;
+            let parsed = crate::parsers::datum::parse_project_datum(&datum_hex);
 
-                    // Update milestones with datum data (amount, time_limit, paused).
-                    // Skip withdrawn milestones — they are consumed on-chain, so the
-                    // datum only contains entries for non-withdrawn milestones.
-                    let milestone_rows: Vec<(i32,)> = sqlx::query_as(
-                        "SELECT id FROM treasury.milestones WHERE project_db_id = $1 AND NOT archived AND NOT withdrawn ORDER BY milestone_order"
-                    )
-                    .bind(project_db_id)
-                    .fetch_all(&self.pool)
-                    .await?;
+            // Project-level error column reflects either a top-level CBOR/shape error
+            // (no vendor_info, no milestones) or just the vendor-info error.
+            let project_err = parsed.top_level_error.clone()
+                .or_else(|| parsed.vendor_info_error.clone());
 
-                    for (datum_idx, (db_id,)) in milestone_rows.iter().enumerate() {
-                        if let Some(ms_datum) = parsed.milestones.get(datum_idx) {
+            if let Some(ref e) = project_err {
+                tracing::warn!(
+                    "Fund datum parse error for tx {} (project {}): {}",
+                    event.tx_hash, project_id, e
+                );
+            }
+
+            sqlx::query(
+                r#"
+                UPDATE treasury.projects
+                SET vendor_payment_key_hash = COALESCE($1, vendor_payment_key_hash),
+                    datum_parse_error = $2
+                WHERE id = $3
+                "#
+            )
+            .bind(&parsed.vendor_payment_key_hash)
+            .bind(&project_err)
+            .bind(project_db_id)
+            .execute(&self.pool)
+            .await?;
+
+            // Update milestones with datum data (amount, time_limit, paused).
+            //
+            // The FUND tx output's datum represents the *initial* project state —
+            // every milestone is non-withdrawn and present in original order. So
+            // we apply by `milestone_order` to ALL non-archived milestones,
+            // including ones now marked withdrawn by later events. Without this,
+            // a periodic re-run after withdrawals would skip the withdrawn rows
+            // and they would keep their NULL amount/time_limit forever.
+            if parsed.top_level_error.is_none() {
+                let milestone_rows: Vec<(i32,)> = sqlx::query_as(
+                    "SELECT id FROM treasury.milestones WHERE project_db_id = $1 AND NOT archived ORDER BY milestone_order"
+                )
+                .bind(project_db_id)
+                .fetch_all(&self.pool)
+                .await?;
+
+                for (datum_idx, (db_id,)) in milestone_rows.iter().enumerate() {
+                    match parsed.milestones.get(datum_idx) {
+                        Some(Ok(ms_datum)) => {
                             sqlx::query(
                                 r#"
                                 UPDATE treasury.milestones
-                                SET amount_lovelace = $1, time_limit = $2, paused = $3
+                                SET amount_lovelace = $1,
+                                    time_limit = $2,
+                                    paused = $3,
+                                    datum_parse_error = NULL
                                 WHERE id = $4
                                 "#
                             )
@@ -495,22 +526,43 @@ impl EventProcessor {
                             .execute(&self.pool)
                             .await?;
                         }
+                        Some(Err(err)) => {
+                            tracing::warn!(
+                                "Milestone {} datum parse error for tx {}: {}",
+                                datum_idx, event.tx_hash, err
+                            );
+                            sqlx::query(
+                                "UPDATE treasury.milestones SET datum_parse_error = $1 WHERE id = $2"
+                            )
+                            .bind(err)
+                            .bind(db_id)
+                            .execute(&self.pool)
+                            .await?;
+                        }
+                        None => {} // datum has fewer entries than DB has milestones
                     }
-
-                    // Store raw CBOR on the UTXO tracking row
-                    sqlx::query(
-                        "UPDATE treasury.utxo_history SET inline_datum_cbor = $1 WHERE tx_hash = $2 AND project_db_id = $3"
-                    )
-                    .bind(&datum_hex)
-                    .bind(&event.tx_hash)
-                    .bind(project_db_id)
-                    .execute(&self.pool)
-                    .await?;
-                }
-                Err(e) => {
-                    tracing::debug!("Could not parse fund datum for {}: {}", event.tx_hash, e);
                 }
             }
+
+            // Store raw CBOR on the UTXO tracking row, but only if we have a
+            // *better* datum than what's already stored. The trigger and
+            // pre_fetch may have captured the larger original datum already;
+            // overwriting with a shorter one (e.g., a re-fetch that picked
+            // a sibling change output) would corrupt the project's saved
+            // datum. Preserve the longest one we've seen.
+            sqlx::query(
+                r#"
+                UPDATE treasury.utxo_history
+                SET inline_datum_cbor = $1
+                WHERE tx_hash = $2 AND project_db_id = $3
+                  AND (inline_datum_cbor IS NULL OR length($1) > length(inline_datum_cbor))
+                "#
+            )
+            .bind(&datum_hex)
+            .bind(&event.tx_hash)
+            .bind(project_db_id)
+            .execute(&self.pool)
+            .await?;
         }
 
         Ok(())
@@ -1306,9 +1358,22 @@ impl EventProcessor {
 
     /// Fetch script UTXO data (address, lovelace_amount, inline_datum) for a transaction.
     /// Tries yaci_store.address_utxo first, falls back to pre-fetched treasury.utxo_history.
+    ///
+    /// Ordering: prefer the addr1x output with the LARGEST inline_datum. Fund txs
+    /// can produce multiple script outputs — typically a vendor-contract output
+    /// carrying the project datum (kilobytes) plus a treasury-contract change
+    /// output carrying a trivial `Constr(0, [])` datum (3 bytes). Picking the
+    /// larger datum reliably selects the vendor contract output without needing
+    /// to know its address up front.
     async fn get_script_utxo_for_tx(&self, tx_hash: &str) -> anyhow::Result<(Option<String>, Option<i64>, Option<String>)> {
         let result: Option<(String, Option<i64>, Option<String>)> = sqlx::query_as(
-            "SELECT owner_addr, lovelace_amount, inline_datum FROM yaci_store.address_utxo WHERE tx_hash = $1 AND owner_addr LIKE 'addr1x%' LIMIT 1"
+            r#"
+            SELECT owner_addr, lovelace_amount, inline_datum
+            FROM yaci_store.address_utxo
+            WHERE tx_hash = $1 AND owner_addr LIKE 'addr1x%'
+            ORDER BY length(COALESCE(inline_datum, '')) DESC
+            LIMIT 1
+            "#
         )
         .bind(tx_hash)
         .fetch_optional(&self.pool)
@@ -1320,7 +1385,13 @@ impl EventProcessor {
 
         // Fallback to pre-fetched treasury.utxo_history
         let result: Option<(Option<String>, Option<i64>, Option<String>)> = sqlx::query_as(
-            "SELECT address, lovelace_amount, inline_datum_cbor FROM treasury.utxo_history WHERE tx_hash = $1 AND address LIKE 'addr1x%' LIMIT 1"
+            r#"
+            SELECT address, lovelace_amount, inline_datum_cbor
+            FROM treasury.utxo_history
+            WHERE tx_hash = $1 AND address LIKE 'addr1x%'
+            ORDER BY length(COALESCE(inline_datum_cbor, '')) DESC
+            LIMIT 1
+            "#
         )
         .bind(tx_hash)
         .fetch_optional(&self.pool)
@@ -1385,48 +1456,57 @@ impl EventProcessor {
         };
 
         if let Some(datum_hex) = inline_datum {
-            match crate::parsers::datum::parse_project_datum(&datum_hex) {
-                Ok(parsed) => {
-                    // Get non-withdrawn milestones ordered by milestone_order.
-                    // Withdrawn milestones are consumed on-chain, so the datum only
-                    // contains entries for non-withdrawn milestones. We must skip
-                    // withdrawn rows to keep datum indices aligned with DB rows.
-                    let milestone_ids: Vec<(i32,)> = sqlx::query_as(
-                        "SELECT id FROM treasury.milestones WHERE project_db_id = $1 AND NOT archived AND NOT withdrawn ORDER BY milestone_order"
+            let parsed = crate::parsers::datum::parse_project_datum(&datum_hex);
+
+            if let Some(ref e) = parsed.top_level_error {
+                tracing::warn!(
+                    "Pause/resume datum parse error for tx {}: {}",
+                    tx_hash, e
+                );
+                return Ok(());
+            }
+
+            // Get non-withdrawn milestones ordered by milestone_order.
+            // Withdrawn milestones are consumed on-chain, so the datum only
+            // contains entries for non-withdrawn milestones. We must skip
+            // withdrawn rows to keep datum indices aligned with DB rows.
+            let milestone_ids: Vec<(i32,)> = sqlx::query_as(
+                "SELECT id FROM treasury.milestones WHERE project_db_id = $1 AND NOT archived AND NOT withdrawn ORDER BY milestone_order"
+            )
+            .bind(project_db_id)
+            .fetch_all(&self.pool)
+            .await?;
+
+            for (datum_idx, (db_id,)) in milestone_ids.iter().enumerate() {
+                if let Some(Ok(ms_datum)) = parsed.milestones.get(datum_idx) {
+                    sqlx::query(
+                        "UPDATE treasury.milestones SET paused = $1 WHERE id = $2"
                     )
-                    .bind(project_db_id)
-                    .fetch_all(&self.pool)
+                    .bind(ms_datum.paused)
+                    .bind(db_id)
+                    .execute(&self.pool)
                     .await?;
-
-                    for (datum_idx, (db_id,)) in milestone_ids.iter().enumerate() {
-                        if let Some(ms_datum) = parsed.milestones.get(datum_idx) {
-                            sqlx::query(
-                                "UPDATE treasury.milestones SET paused = $1 WHERE id = $2"
-                            )
-                            .bind(ms_datum.paused)
-                            .bind(db_id)
-                            .execute(&self.pool)
-                            .await?;
-                        }
-                    }
-
-                    // Update contract-level status: paused if ALL milestones paused
-                    let all_paused = parsed.milestones.iter().all(|m| m.paused);
-                    let any_paused = parsed.milestones.iter().any(|m| m.paused);
-                    if all_paused && !parsed.milestones.is_empty() {
-                        sqlx::query("UPDATE treasury.projects SET status = 'paused' WHERE id = $1")
-                            .bind(project_db_id)
-                            .execute(&self.pool)
-                            .await?;
-                    } else if !any_paused {
-                        sqlx::query("UPDATE treasury.projects SET status = 'active' WHERE id = $1")
-                            .bind(project_db_id)
-                            .execute(&self.pool)
-                            .await?;
-                    }
                 }
-                Err(e) => {
-                    tracing::debug!("Could not parse datum for pause/resume: {}", e);
+            }
+
+            // Update contract-level status: paused if ALL milestones paused.
+            // Only consider successfully-parsed milestones; if any failed to
+            // parse we can't trust the all/any predicate and skip the update.
+            let parsed_ms: Vec<&crate::parsers::datum::ParsedMilestoneDatum> =
+                parsed.milestones.iter().filter_map(|m| m.as_ref().ok()).collect();
+            if !parsed_ms.is_empty() && parsed_ms.len() == parsed.milestones.len() {
+                let all_paused = parsed_ms.iter().all(|m| m.paused);
+                let any_paused = parsed_ms.iter().any(|m| m.paused);
+                if all_paused {
+                    sqlx::query("UPDATE treasury.projects SET status = 'paused' WHERE id = $1")
+                        .bind(project_db_id)
+                        .execute(&self.pool)
+                        .await?;
+                } else if !any_paused {
+                    sqlx::query("UPDATE treasury.projects SET status = 'active' WHERE id = $1")
+                        .bind(project_db_id)
+                        .execute(&self.pool)
+                        .await?;
                 }
             }
         }

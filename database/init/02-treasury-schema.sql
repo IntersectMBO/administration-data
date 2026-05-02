@@ -47,12 +47,13 @@ CREATE TABLE IF NOT EXISTS treasury.projects (
     description TEXT,                            -- Project description (joined if array)
     vendor_address TEXT,                         -- Payment destination (vendor.label in metadata)
     contract_address TEXT,                       -- PSSC script address (from fund tx output)
-    vendor_payment_key_hash VARCHAR(56),
+    vendor_payment_key_hash TEXT,                -- Comma-joined hex hashes; multi-party datums produce multiple
     fund_tx_hash VARCHAR(64) NOT NULL,           -- Fund transaction
     fund_slot BIGINT,                            -- Blockchain slot
     fund_block_time BIGINT,                      -- Block timestamp
     initial_amount_lovelace BIGINT,              -- Initial funding amount (from tx output)
     status TEXT DEFAULT 'active',                -- active/paused/completed/cancelled
+    datum_parse_error TEXT,                      -- Set when fund datum parse failed; cleared on success
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -92,6 +93,9 @@ CREATE TABLE IF NOT EXISTS treasury.milestones (
     archived_by_tx_hash VARCHAR(64),
     archived_at BIGINT,
     superseded_by INT REFERENCES treasury.milestones(id),
+
+    -- Datum parse diagnostics (per-milestone)
+    datum_parse_error TEXT,
 
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()

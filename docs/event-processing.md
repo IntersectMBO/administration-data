@@ -208,19 +208,22 @@ Additionally queries `yaci_store.address_utxo` for the fund tx to get:
 
 **Treasury address fallback**: If the treasury `contract_address` is still null, derives it from the fund tx inputs by finding the `addr1x%` input address that differs from the vendor contract output. Also derives `stake_credential` from the treasury address via bech32 decoding.
 
-**Datum integration**: After UTXO recording, queries `inline_datum` from the fund tx output (`addr1x%` address). If available, parses the CBOR datum via `parse_vendor_contract_datum()` to:
-- Store `vendor_payment_key_hash` on the vendor contract row
-- Update each milestone's `amount_lovelace`, `time_limit`, and `paused` flag from the datum (overwriting metadata-provided amounts with authoritative on-chain values)
-- Store raw CBOR hex on the UTXO tracking row (`inline_datum_cbor`)
+**Datum integration**: After UTXO recording, queries `inline_datum` from the fund tx's largest `addr1x%` script output (ordered by datum length DESC to avoid picking the trivial change-output datum). If available, parses the CBOR datum via `parse_project_datum()` to:
+- Store `vendor_payment_key_hash` (TEXT, comma-joined for multi-key datums) on the project row
+- Update each milestone's `amount_lovelace`, `time_limit`, and `paused` flag from the datum (overwriting metadata-provided amounts with authoritative on-chain values). Updates by `milestone_order` regardless of current `withdrawn` flag — the fund datum represents initial state.
+- Store raw CBOR hex on the UTXO tracking row (`inline_datum_cbor`), but only if the new datum is longer than what's already stored (preserves originals against later corrupting overwrites).
+
+The parser is partial: vendor info and each milestone parse independently. Errors land in `treasury.projects.datum_parse_error` and `treasury.milestones.datum_parse_error`.
 
 #### DB Writes
 - **UPSERT** `treasury.treasury_contracts` (ensure exists)
-- **INSERT** `treasury.vendor_contracts` (ON CONFLICT by `project_id` updates name/description)
-- **INSERT** `treasury.milestones` (one per milestone, ON CONFLICT DO NOTHING)
+- **UPSERT** `treasury.vendor_contracts` (singleton PSSC row at the shared script address)
+- **INSERT** `treasury.projects` (ON CONFLICT by `project_id` updates `project_name`/`description`)
+- **INSERT** `treasury.milestones` (one per milestone, ON CONFLICT DO NOTHING on active key)
 - **INSERT** `treasury.events`
-- **INSERT** `treasury.utxos` (record output UTXOs for chain tracking, with `inline_datum_cbor` if available)
-- **UPDATE** `treasury.vendor_contracts` — sets `vendor_payment_key_hash` (from datum, if available)
-- **UPDATE** `treasury.milestones` — sets `amount_lovelace`, `time_limit`, `paused` per milestone (from datum, if available)
+- **UPSERT** `treasury.utxo_history` (record output UTXOs for chain tracking, with `inline_datum_cbor` if available)
+- **UPDATE** `treasury.projects` — sets `vendor_payment_key_hash` and `datum_parse_error` (from datum, if available)
+- **UPDATE** `treasury.milestones` — sets `amount_lovelace`, `time_limit`, `paused` per milestone, plus `datum_parse_error` for individual failures
 
 ---
 
@@ -587,19 +590,21 @@ Constr(0, [
 
 | Context | Function | What happens |
 |---------|----------|-------------|
-| `fund` event | `parse_vendor_contract_datum()` | Populates `vendor_payment_key_hash`, per-milestone `amount_lovelace`, `time_limit`, `paused` |
-| `pause` event | `update_milestone_pause_from_datum()` | Updates per-milestone `paused` flags, derives contract status |
-| `resume` event | `update_milestone_pause_from_datum()` | Updates per-milestone `paused` flags, derives contract status |
-| UTXO chain tracking | `find_vendor_contract_from_inputs()` | Stores `inline_datum_cbor` on new UTXO rows for later use |
+| `fund` event | `parse_project_datum()` | Populates `vendor_payment_key_hash`, per-milestone `amount_lovelace`, `time_limit`, `paused` |
+| `pause` event | `update_milestone_pause_from_datum()` | Updates per-milestone `paused` flags, derives project status |
+| `resume` event | `update_milestone_pause_from_datum()` | Updates per-milestone `paused` flags, derives project status |
+| UTXO chain tracking | `find_project_from_inputs()` | Stores `inline_datum_cbor` on new UTXO rows for later use |
 
 ### Fields Extracted
 
 | Datum Field | DB Column | Table |
 |-------------|-----------|-------|
-| `vendor_payment_key_hash` | `vendor_payment_key_hash` | `vendor_contracts` |
+| Vendor info key hashes (comma-joined for multi-key) | `vendor_payment_key_hash` | `projects` |
 | Per-milestone `time_limit` | `time_limit` | `milestones` |
 | Per-milestone lovelace from Value map | `amount_lovelace` | `milestones` |
 | Per-milestone `Constr(0\|1)` | `paused` | `milestones` |
+| Parse failures (top-level or vendor-info) | `datum_parse_error` | `projects` |
+| Per-milestone parse failures | `datum_parse_error` | `milestones` |
 
 ### Prerequisite
 
