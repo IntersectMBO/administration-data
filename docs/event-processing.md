@@ -49,7 +49,7 @@ UTXOs at the shared address are distinguished by their **inline datum** (contain
 
 ### Implications for UTXO Tracking
 
-- `find_vendor_contract_from_inputs()` traces inputs back through the UTXO chain — the correct and only approach for linking events to projects
+- `find_project_from_inputs()` traces inputs back through the UTXO chain — the correct and only approach for linking events to projects
 - UTXO tracking relies exclusively on chain tracing by specific (tx_hash, output_index) pairs, not by address
 
 ---
@@ -189,11 +189,11 @@ Records the tx hash and block time. Also queries `yaci_store.address_utxo` for t
 #### Code Extraction (`process_fund`)
 | Metadata Path | Extracted As | DB Column |
 |---------------|-------------|-----------|
-| `body.identifier` | string | `vendor_contracts.project_id` |
-| `body.label` | `extract_text()` | `vendor_contracts.project_name` |
-| `body.description` | `extract_text()` | `vendor_contracts.description` |
-| `body.vendor.label` | `extract_text_from_value()` | `vendor_contracts.vendor_address` |
-| `body.otherIdentifiers` | string array | `vendor_contracts.other_identifiers` |
+| `body.identifier` | string | `projects.project_id` |
+| `body.label` | `extract_text()` | `projects.project_name` |
+| `body.description` | `extract_text()` | `projects.description` |
+| `body.vendor.label` | `extract_text_from_value()` | `projects.vendor_address` |
+| `body.otherIdentifiers` | string array | `projects.other_identifiers` |
 | `body.milestones[].identifier` | string | `milestones.milestone_id` |
 | `body.milestones[].label` | `extract_text_from_value()` | `milestones.label` |
 | `body.milestones[].description` | `extract_text_from_value()` | `milestones.description` |
@@ -247,12 +247,12 @@ The parser is partial: vendor info and each milestone parse independently. Error
 #### Code Extraction (`process_complete`)
 | Metadata Path | Extracted As | DB Column |
 |---------------|-------------|-----------|
-| `body.identifier` | string (fallback) | Used to find vendor_contract_id |
+| `body.identifier` | string (fallback) | Used to find project_db_id |
 | `body.milestones.<id>.description` | `extract_text_from_value()` | `milestones.complete_description` |
 | `body.milestones.<id>.evidence` | raw JSON clone | `milestones.evidence` |
 | `body.milestone` | string (legacy format) | Used to find milestone by ID |
 
-**Project identification**: First tries `body.identifier` to look up vendor contract by project_id. Falls back to `find_vendor_contract_from_inputs()` (UTXO chain tracing).
+**Project identification**: First tries `body.identifier` to look up the project by project_id. Falls back to `find_project_from_inputs()` (UTXO chain tracing).
 
 **Milestone format handling**: Code handles milestones as an object keyed by milestone ID (`.as_object()`), which matches the spec. Also handles legacy single `body.milestone` field as a fallback.
 
@@ -284,12 +284,12 @@ The parser is partial: vendor info and each milestone parse independently. Error
 
 **Not extracted**: `label`, `description`, `justification`, `estimatedReturn`
 
-Disburse is a treasury-level operation. The code looks up `treasury_id` from `instance` and does **not** call `find_vendor_contract_from_inputs`. `vendor_contract_id` is always `None` for disburse events.
+Disburse is a treasury-level operation. The code looks up `treasury_id` from `instance` and does **not** call `find_project_from_inputs`. `project_db_id` is always `None` for disburse events.
 
 **Note**: `destination` extraction uses `extract_text()` which expects a string or string array, while the spec defines destination as an object with `label`/`details`. This means structured destination metadata may not be fully captured.
 
 #### DB Writes
-- **INSERT** `treasury.events` (with destination field, `vendor_contract_id = NULL`)
+- **INSERT** `treasury.events` (with `destination` JSONB, `project_db_id = NULL`)
 
 ---
 
@@ -306,7 +306,7 @@ Disburse is a treasury-level operation. The code looks up `treasury_id` from `in
 #### Code Extraction (`process_withdraw`)
 | Metadata Path | Extracted As | DB Column |
 |---------------|-------------|-----------|
-| `body.identifier` | string | Used to find vendor_contract_id |
+| `body.identifier` | string | Used to find project_db_id |
 | `body.milestones` | object keyed by milestone ID | Iterates over all milestone IDs |
 | `body.milestone` | string (legacy fallback) | Used to find milestone by ID if `milestones` absent |
 
@@ -335,7 +335,7 @@ Additionally queries `yaci_store.address_utxo` for the withdraw tx to calculate 
 #### Code Extraction (`process_pause`)
 | Metadata Path | Extracted As | DB Column |
 |---------------|-------------|-----------|
-| `body.identifier` | string | Used to find vendor_contract_id |
+| `body.identifier` | string | Used to find project_db_id |
 | `body.reason` | `extract_text()` | `events.reason` |
 
 **Per-milestone pause via datum**: After identifying the vendor contract, calls `update_milestone_pause_from_datum()` which parses the output datum of the pause transaction. Each milestone in the datum has a `Constr(0|1, [])` pause flag (0=active, 1=paused), and the code updates the `paused` boolean on each milestone row accordingly.
@@ -346,7 +346,7 @@ Additionally queries `yaci_store.address_utxo` for the withdraw tx to calculate 
 
 #### DB Writes
 - **UPDATE** `treasury.milestones` — sets `paused` flag per milestone (from datum)
-- **UPDATE** `treasury.vendor_contracts` — sets `status` to `'paused'` or `'active'` (derived from per-milestone state)
+- **UPDATE** `treasury.projects` — sets `status` to `'paused'` or `'active'` (derived from per-milestone state)
 - **INSERT** `treasury.events` (with reason)
 
 ---
@@ -364,7 +364,7 @@ Additionally queries `yaci_store.address_utxo` for the withdraw tx to calculate 
 #### Code Extraction (`process_resume`)
 | Metadata Path | Extracted As | DB Column |
 |---------------|-------------|-----------|
-| `body.identifier` | string | Used to find vendor_contract_id |
+| `body.identifier` | string | Used to find project_db_id |
 
 **Per-milestone resume via datum**: Same mechanism as pause. After identifying the vendor contract, calls `update_milestone_pause_from_datum()` which parses the output datum to read each milestone's pause flag and updates the `paused` boolean per milestone row.
 
@@ -374,7 +374,7 @@ Additionally queries `yaci_store.address_utxo` for the withdraw tx to calculate 
 
 #### DB Writes
 - **UPDATE** `treasury.milestones` — sets `paused` flag per milestone (from datum)
-- **UPDATE** `treasury.vendor_contracts` — sets `status` to `'paused'` or `'active'` (derived from per-milestone state)
+- **UPDATE** `treasury.projects` — sets `status` to `'paused'` or `'active'` (derived from per-milestone state)
 - **INSERT** `treasury.events`
 
 ---
@@ -399,21 +399,21 @@ Additionally queries `yaci_store.address_utxo` for the withdraw tx to calculate 
 #### Code Extraction (`process_modify`)
 | Metadata Path | Extracted As | DB Column |
 |---------------|-------------|-----------|
-| `body.identifier` | string | Used to find vendor_contract_id |
-| `body.label` | `extract_text()` | `vendor_contracts.project_name` (COALESCE update) |
-| `body.description` | `extract_text()` | `vendor_contracts.description` (COALESCE update) |
-| `body.vendor.label` | `extract_text_from_value()` | `vendor_contracts.vendor_address` (COALESCE update) |
+| `body.identifier` | string | Used to find project_db_id |
+| `body.label` | `extract_text()` | `projects.project_name` (COALESCE update) |
+| `body.description` | `extract_text()` | `projects.description` (COALESCE update) |
+| `body.vendor.label` | `extract_text_from_value()` | `projects.vendor_address` (COALESCE update) |
 | `body.reason` | `extract_text()` | `events.reason` |
 | `body.milestones` | array or object of milestones | Archives old, inserts new |
 
-**Naming fields update**: Before processing milestones, the code extracts `label`, `description`, and `vendor.label` and updates the vendor contract row using COALESCE (only overwrites if the new value is non-null).
+**Naming fields update**: Before processing milestones, the code extracts `label`, `description`, and `vendor.label` and updates the project row using COALESCE (only overwrites if the new value is non-null).
 
 **Milestone format handling**: Same as fund — milestones are accepted in both array format (`[{identifier: "m-0", ...}]`) and object format (`{"m-0": {...}}`).
 
 Milestone field extraction is identical to fund (identifier, label, description, acceptanceCriteria, amount).
 
 #### DB Writes
-- **UPDATE** `treasury.vendor_contracts` — COALESCE update of `project_name`, `description`, `vendor_address`
+- **UPDATE** `treasury.projects` — COALESCE update of `project_name`, `description`, `vendor_address`
 - **UPDATE** `treasury.milestones` — sets `archived = TRUE`, `archived_by_tx_hash`, `archived_at` for all active milestones
 - **INSERT** `treasury.milestones` — new milestone rows
 - **UPDATE** `treasury.milestones` — sets `superseded_by` FK linking old → new rows with matching milestone_id
@@ -434,11 +434,11 @@ Milestone field extraction is identical to fund (identifier, label, description,
 #### Code Extraction (`process_cancel`)
 | Metadata Path | Extracted As | DB Column |
 |---------------|-------------|-----------|
-| `body.identifier` | string | Used to find vendor_contract_id |
+| `body.identifier` | string | Used to find project_db_id |
 | `body.reason` | `extract_text()` | `events.reason` |
 
 #### DB Writes
-- **UPDATE** `treasury.vendor_contracts` — sets `status = 'cancelled'`
+- **UPDATE** `treasury.projects` — sets `status = 'cancelled'`
 - **INSERT** `treasury.events` (with reason)
 
 ---
@@ -516,13 +516,13 @@ The TOM spec defines the `vendor` object as:
 }
 ```
 
-The TOM spec has no `vendor.name` field — `vendor_contracts.vendor_name` is a deprecated column (always null). `vendor.label` is extracted via `extract_text_from_value()` into `vendor_contracts.vendor_address`.
+The TOM spec has no `vendor.name` field — `vendor_name` was a deprecated column on the old `vendor_contracts` table and has been dropped. `vendor.label` is extracted via `extract_text_from_value()` into `projects.vendor_address`.
 
 In practice, vendor identity comes from the top-level `body.label` which by convention includes the vendor name (e.g., `"Tastenkunst GmbH - Eternl Maintenance"`). The `vendor.label` field in real metadata contains the vendor's payment address (a Cardano address), not their display name.
 
 ### Contract URL
 
-The `contract_url` column on `vendor_contracts` is deprecated (always null). Contract URL extraction was removed as no on-chain data populates this field.
+The `contract_url` column was a deprecated column on the old `vendor_contracts` table and has been dropped. Contract URL extraction was removed as no on-chain data populates this field.
 
 ### Milestone Format: Object vs Array
 
@@ -543,22 +543,26 @@ Real on-chain metadata uses both arrays and objects for fund/modify events. The 
 
 ### How It Works
 
-When a `fund` event is processed, the code records all output UTXOs from that transaction in `treasury.utxos` with the `vendor_contract_id`. Subsequent events (complete, withdraw, etc.) spend those UTXOs, so the processor can trace backwards to find which project an event belongs to.
+When a `fund` event is processed, the code records all output UTXOs from that transaction in `treasury.utxo_history` with the `project_db_id`. Subsequent events (complete, withdraw, etc.) spend those UTXOs, so the processor can trace backwards to find which project an event belongs to.
 
-### `find_vendor_contract_from_inputs()`
+In addition, Postgres triggers installed by `install_utxo_history_triggers` (`api/src/services/sync.rs`) capture every script-address UTXO YACI Store inserts into `treasury.utxo_history` synchronously, regardless of any TOM event. This makes the chain trace robust against YACI Store's UTXO pruning.
+
+### `find_project_from_inputs()`
 
 ```
 1. Get inputs to this tx: SELECT tx_hash, output_index FROM yaci_store.tx_input
                           WHERE spent_tx_hash = $1
-2. For each input, look up: SELECT vendor_contract_id FROM treasury.utxos
+2. For each input, look up: SELECT project_db_id FROM treasury.utxo_history
                              WHERE tx_hash = $1 AND output_index = $2
-3. If found: mark old UTXO as spent, record new output UTXOs with same vendor_contract_id
-4. Return first matching vendor_contract_id
+3. If found: mark old UTXO as spent, record new output UTXOs with same project_db_id
+4. Return best-scoring project_db_id (see disambiguation below)
 ```
 
 This correctly traces the UTXO chain regardless of address, because it tracks by specific (tx_hash, output_index) pairs.
 
-When recording new output UTXOs (step 3), the code also stores `inline_datum_cbor` if the output has an inline datum in `yaci_store.address_utxo`. This datum is used later by pause/resume processing.
+When multiple inputs map to different projects (e.g. a sibling project's fee/collateral input), the trace scores each candidate against `body.milestones` keys via `collect_milestone_id_hints` and prefers the one whose stored milestones match.
+
+When recording new output UTXOs (step 3), the code also stores `inline_datum_cbor` if the output has an inline datum. This datum is used later by pause/resume processing.
 
 ---
 
@@ -618,13 +622,13 @@ All 11 bugs have been fixed. This section documents the original issues and thei
 
 ### Critical (Fixed)
 
-**1. ~~`sync_address_utxos()` misassigns UTXOs~~** — FIXED: Deleted `sync_utxos()` and `sync_address_utxos()`. UTXO tracking now relies exclusively on `find_vendor_contract_from_inputs()` chain tracing.
+**1. ~~`sync_address_utxos()` misassigns UTXOs~~** — FIXED: Deleted `sync_utxos()` and `sync_address_utxos()`. UTXO tracking now relies exclusively on `find_project_from_inputs()` chain tracing.
 
 **2. ~~`vendor.name` always null~~** — FIXED: `vendor_name` column is deprecated (always null). TOM spec has no `vendor.name` field. `vendor.label` correctly maps to `vendor_address`.
 
 ### High (Fixed)
 
-**3. ~~Disburse events incorrectly linked to vendor contracts~~** — FIXED: `process_disburse` now takes `instance` parameter and looks up `treasury_id` directly. No longer calls `find_vendor_contract_from_inputs`. `vendor_contract_id` is always `None` for disburse events.
+**3. ~~Disburse events incorrectly linked to vendor contracts~~** — FIXED: `process_disburse` now takes `instance` parameter and looks up `treasury_id` directly. No longer calls `find_project_from_inputs`. `project_db_id` is always `None` for disburse events.
 
 **4. Multiple UTXO inputs → first match wins** — Acceptable: A transaction spending vendor contract UTXOs belongs to one project. First-match is the correct behavior.
 
@@ -654,22 +658,22 @@ All 11 bugs have been fixed. This section documents the original issues and thei
 -- Get raw metadata for a project's fund event
 SELECT e.tx_hash, e.metadata
 FROM treasury.events e
-JOIN treasury.vendor_contracts vc ON vc.id = e.vendor_contract_id
-WHERE vc.project_id = 'EC-0008-25' AND e.event_type = 'fund';
+JOIN treasury.projects p ON p.id = e.project_db_id
+WHERE p.project_id = 'EC-0008-25' AND e.event_type = 'fund';
 
 -- Compare with stored values
 SELECT project_id, project_name, vendor_address, description
-FROM treasury.vendor_contracts
+FROM treasury.projects
 WHERE project_id = 'EC-0008-25';
 ```
 
 ### Check for duplicate contract_addresses across projects
 
 ```sql
--- All projects sharing the same contract address (expected: all share one)
+-- All projects sharing the same contract address (expected: all share the singleton PSSC)
 SELECT contract_address, COUNT(*) as project_count,
        array_agg(project_id ORDER BY project_id) as projects
-FROM treasury.vendor_contracts
+FROM treasury.projects
 WHERE contract_address IS NOT NULL
 GROUP BY contract_address
 HAVING COUNT(*) > 1;
@@ -679,12 +683,12 @@ HAVING COUNT(*) > 1;
 
 ```sql
 -- Check if UTXOs at the shared address are spread across projects or concentrated on one
-SELECT u.vendor_contract_id, vc.project_id, COUNT(*) as utxo_count,
+SELECT u.project_db_id, p.project_id, COUNT(*) as utxo_count,
        SUM(u.lovelace_amount) as total_lovelace
-FROM treasury.utxos u
-JOIN treasury.vendor_contracts vc ON vc.id = u.vendor_contract_id
+FROM treasury.utxo_history u
+JOIN treasury.projects p ON p.id = u.project_db_id
 WHERE NOT u.spent
-GROUP BY u.vendor_contract_id, vc.project_id
+GROUP BY u.project_db_id, p.project_id
 ORDER BY utxo_count DESC;
 ```
 
@@ -693,16 +697,16 @@ ORDER BY utxo_count DESC;
 ```sql
 -- Follow the UTXO chain for a specific project
 WITH RECURSIVE utxo_chain AS (
-    SELECT u.tx_hash, u.output_index, u.spent, u.spent_tx_hash, u.vendor_contract_id, 1 as depth
-    FROM treasury.utxos u
-    JOIN treasury.vendor_contracts vc ON vc.id = u.vendor_contract_id
-    WHERE vc.project_id = 'EC-0008-25'
-      AND u.tx_hash = vc.fund_tx_hash
+    SELECT u.tx_hash, u.output_index, u.spent, u.spent_tx_hash, u.project_db_id, 1 as depth
+    FROM treasury.utxo_history u
+    JOIN treasury.projects p ON p.id = u.project_db_id
+    WHERE p.project_id = 'EC-0008-25'
+      AND u.tx_hash = p.fund_tx_hash
 
     UNION ALL
 
-    SELECT u.tx_hash, u.output_index, u.spent, u.spent_tx_hash, u.vendor_contract_id, uc.depth + 1
-    FROM treasury.utxos u
+    SELECT u.tx_hash, u.output_index, u.spent, u.spent_tx_hash, u.project_db_id, uc.depth + 1
+    FROM treasury.utxo_history u
     JOIN utxo_chain uc ON u.tx_hash = uc.spent_tx_hash
     WHERE uc.spent = true AND uc.depth < 20
 )
@@ -714,9 +718,9 @@ SELECT * FROM utxo_chain ORDER BY depth;
 ```sql
 -- All events with project context, ordered by time
 SELECT e.event_type, e.block_time, e.tx_hash,
-       vc.project_id, vc.project_name
+       p.project_id, p.project_name
 FROM treasury.events e
-LEFT JOIN treasury.vendor_contracts vc ON vc.id = e.vendor_contract_id
+LEFT JOIN treasury.projects p ON p.id = e.project_db_id
 ORDER BY e.block_time DESC
 LIMIT 50;
 ```
@@ -726,9 +730,9 @@ LIMIT 50;
 ```sql
 -- View raw metadata for all complete events
 SELECT e.tx_hash, e.block_time,
-       vc.project_id,
+       p.project_id,
        e.metadata->'body'->'milestones' as milestones_meta
 FROM treasury.events e
-LEFT JOIN treasury.vendor_contracts vc ON vc.id = e.vendor_contract_id
+LEFT JOIN treasury.projects p ON p.id = e.project_db_id
 WHERE e.event_type = 'complete';
 ```

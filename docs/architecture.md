@@ -32,10 +32,11 @@ This document describes how data flows through the Cardano Administration Data S
 │   │  (raw blockchain data)      │    │  (normalized app data)      │           │
 │   │                             │    │                             │           │
 │   │  • block                    │    │  • treasury_contracts       │           │
-│   │  • transaction              │    │  • vendor_contracts         │           │
-│   │  • address_utxo             │    │  • milestones               │           │
-│   │  • transaction_metadata     │    │  • events                   │           │
-│   │  • tx_input                 │    │  • utxos                    │           │
+│   │  • transaction              │    │  • vendor_contracts (PSSC)  │           │
+│   │  • address_utxo             │    │  • projects                 │           │
+│   │  • transaction_metadata     │    │  • milestones               │           │
+│   │  • tx_input                 │    │  • events                   │           │
+│   │                             │    │  • utxo_history             │           │
 │   └─────────────────────────────┘    └─────────────────────────────┘           │
 └─────────────────────────────────────────────────────────────────────────────────┘
                                        │
@@ -181,14 +182,18 @@ three things every 15 seconds:
 
 1. Reads `treasury.sync_status` to find `last_slot` for `sync_type = 'events'`.
 2. Selects new label-`1694` rows from `yaci_store.transaction_metadata` past
-   that slot, plus a one-shot pre-fetch of their UTXOs into `treasury.utxos`
-   via `EventProcessor::pre_fetch_utxos`. The pre-fetch captures both the
-   tx's outputs and the inputs it spends, *before* YACI Store can prune
-   spent UTXOs (~2160 blocks / ~10 days). This is what makes pause/resume
-   datum parsing and chain tracing keep working long after the on-chain
-   UTXO is gone.
-3. Dispatches each event through the per-type handler and updates
-   `treasury.sync_status` to the highest successfully-processed slot.
+   that slot, plus a one-shot pre-fetch of their UTXOs into
+   `treasury.utxo_history` via `EventProcessor::pre_fetch_utxos`. This is
+   a defensive backstop on top of the Postgres triggers
+   (`install_utxo_history_triggers` in `api/src/services/sync.rs`) that
+   capture every script-address UTXO into `treasury.utxo_history`
+   synchronously with YACI Store's INSERT, regardless of pruning. This is
+   what makes pause/resume datum parsing and chain tracing keep working
+   long after the on-chain UTXO is gone.
+3. Dispatches each event through the per-type handler and advances
+   `treasury.sync_status` only on contiguous success (any failed event
+   wedges the watermark). A separate task runs `sync_all_events` every 10
+   minutes as an idempotent backfill via `ON CONFLICT DO UPDATE`.
 
 > **Caveat — `last_slot` advancement on errors.** If a single event fails
 > mid-batch (e.g. DB connection reset), the loop logs and continues; later
@@ -216,8 +221,9 @@ three things every 15 seconds:
 └─────────────────────────────────────────────────────────────────────────────┘
                                       │
                                       │ pre_fetch_utxos(batch tx_hashes)
-                                      │ ──► treasury.utxos (raw output rows
-                                      │       captured before YACI prunes)
+                                      │ ──► treasury.utxo_history (raw output rows
+                                      │       captured before YACI prunes; primary
+                                      │       capture is via Postgres triggers)
                                       │
                                       │ SELECT WHERE slot > last_synced_slot
                                       ▼
@@ -245,15 +251,20 @@ three things every 15 seconds:
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           treasury schema                                    │
 │                                                                              │
-│   treasury_contracts     vendor_contracts      milestones        events      │
-│   ┌───────────────┐     ┌───────────────┐    ┌───────────┐    ┌──────────┐  │
-│   │ id            │     │ id            │    │ id        │    │ id       │  │
-│   │ instance      │◄────│ treasury_id   │◄───│ vendor_id │    │ tx_hash  │  │
-│   │ stake_cred    │     │ project_id    │    │ label     │    │ event    │  │
-│   │ publish_tx    │     │ project_name  │    │ withdrawn │    │ metadata │  │
-│   └───────────────┘     │ status        │    │ paused    │    └──────────┘  │
-│                         └───────────────┘    │ archived  │                   │
-│                                              └───────────┘                   │
+│   treasury_contracts   projects              milestones        events        │
+│   ┌───────────────┐    ┌───────────────┐    ┌───────────────┐ ┌──────────┐  │
+│   │ id            │    │ id            │    │ id            │ │ id       │  │
+│   │ instance      │◄───│ treasury_id   │◄───│ project_db_id │ │ tx_hash  │  │
+│   │ stake_cred    │    │ project_id    │    │ label         │ │ event    │  │
+│   │ publish_tx    │    │ project_name  │    │ withdrawn     │ │ metadata │  │
+│   └───────────────┘    │ status        │    │ evidence_*    │ └──────────┘  │
+│                        └───────────────┘    │ paused        │                │
+│   vendor_contracts                          │ archived      │                │
+│   ┌───────────────┐                         │ superseded_by │                │
+│   │ id            │                         └───────────────┘                │
+│   │ address (PSSC)│                                                          │
+│   │ stake_cred    │                                                          │
+│   └───────────────┘                                                          │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -293,34 +304,41 @@ three things every 15 seconds:
    │     └──────────────────────────────────────────────────────────────┘  │
    │                                      │                                 │
    │                                      ▼                                 │
-   │  2. INSERT vendor_contracts                                           │
+   │  2. UPSERT vendor_contracts (singleton PSSC row at the shared addr)   │
    │     ┌──────────────────────────────────────────────────────────────┐  │
-   │     │ INSERT INTO treasury.vendor_contracts                        │  │
+   │     │ INSERT INTO treasury.vendor_contracts (address, ...)         │  │
+   │     │ ON CONFLICT (address) DO NOTHING                              │  │
+   │     └──────────────────────────────────────────────────────────────┘  │
+   │                                      │                                 │
+   │                                      ▼                                 │
+   │  3. INSERT projects                                                   │
+   │     ┌──────────────────────────────────────────────────────────────┐  │
+   │     │ INSERT INTO treasury.projects                                │  │
    │     │   (project_id, project_name, vendor_address, ...)             │  │
    │     │ VALUES ('project-001', 'My Project', 'addr1q...', ...)       │  │
    │     └──────────────────────────────────────────────────────────────┘  │
    │                                      │                                 │
    │                                      ▼                                 │
-   │  3. INSERT milestones (for each milestone in array)                   │
+   │  4. INSERT milestones (for each milestone in array)                   │
    │     ┌──────────────────────────────────────────────────────────────┐  │
    │     │ INSERT INTO treasury.milestones                              │  │
-   │     │   (vendor_contract_id, milestone_id, label, amount)          │  │
+   │     │   (project_db_id, milestone_id, label, amount)               │  │
    │     │ VALUES (1, 'm1', 'Phase 1', 1000000)                         │  │
    │     │ VALUES (1, 'm2', 'Phase 2', 2000000)                         │  │
    │     └──────────────────────────────────────────────────────────────┘  │
    │                                      │                                 │
    │                                      ▼                                 │
-   │  4. INSERT event record                                               │
+   │  5. INSERT event record                                               │
    │     ┌──────────────────────────────────────────────────────────────┐  │
    │     │ INSERT INTO treasury.events                                  │  │
-   │     │   (tx_hash, event_type, vendor_contract_id, metadata)        │  │
+   │     │   (tx_hash, event_type, project_db_id, metadata)             │  │
    │     └──────────────────────────────────────────────────────────────┘  │
    │                                      │                                 │
    │                                      ▼                                 │
-   │  5. Track UTXOs for future event lookups                              │
+   │  6. Track UTXOs for future event lookups                              │
    │     ┌──────────────────────────────────────────────────────────────┐  │
-   │     │ INSERT INTO treasury.utxos (tx_hash, output_index,           │  │
-   │     │                             vendor_contract_id, spent)       │  │
+   │     │ INSERT INTO treasury.utxo_history (tx_hash, output_index,    │  │
+   │     │                                project_db_id, spent)          │  │
    │     └──────────────────────────────────────────────────────────────┘  │
    │                                                                        │
    └────────────────────────────────────────────────────────────────────────┘
@@ -346,8 +364,8 @@ three things every 15 seconds:
    │  outputs:                                                               │
    │    [0] → UTXO₁ (contract address, 10,000 ADA)                          │
    │                                                                         │
-   │  ──► Record in treasury.utxos:                                         │
-   │      (tx_hash="abc123", output_index=0, vendor_contract_id=1)          │
+   │  ──► Record in treasury.utxo_history:                                   │
+   │      (tx_hash="abc123", output_index=0, project_db_id=1)               │
    └─────────────────────────────────────────────────────────────────────────┘
                                       │
                                       │ UTXO₁ is spent
@@ -364,11 +382,11 @@ three things every 15 seconds:
    │  outputs:                                                               │
    │    [0] → UTXO₂ (contract address, 9,000 ADA)                           │
    │                                                                         │
-   │  ──► find_vendor_contract_from_inputs("def456"):                       │
+   │  ──► find_project_from_inputs("def456"):                                │
    │      1. Get inputs: [(abc123, 0)]                                      │
-   │      2. Lookup treasury.utxos WHERE tx_hash="abc123" AND index=0       │
-   │      3. Found! vendor_contract_id = 1                                  │
-   │      4. Mark UTXO₁ as spent, record UTXO₂ with vendor_contract_id=1   │
+   │      2. Lookup treasury.utxo_history WHERE tx_hash="abc123" AND index=0│
+   │      3. Found! project_db_id = 1                                       │
+   │      4. Mark UTXO₁ as spent, record UTXO₂ with project_db_id=1         │
    └─────────────────────────────────────────────────────────────────────────┘
                                       │
                                       │ UTXO₂ is spent
@@ -382,10 +400,10 @@ three things every 15 seconds:
    │  inputs:                                                                │
    │    [0] ← UTXO₂ (spending def456:0)                                     │
    │                                                                         │
-   │  ──► find_vendor_contract_from_inputs("ghi789"):                       │
+   │  ──► find_project_from_inputs("ghi789"):                                │
    │      1. Get inputs: [(def456, 0)]                                      │
-   │      2. Lookup treasury.utxos WHERE tx_hash="def456" AND index=0       │
-   │      3. Found! vendor_contract_id = 1                                  │
+   │      2. Lookup treasury.utxo_history WHERE tx_hash="def456" AND index=0│
+   │      3. Found! project_db_id = 1                                       │
    │      4. UPDATE milestones SET withdrawn=TRUE WHERE milestone_id='m1'   │
    └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -393,22 +411,25 @@ three things every 15 seconds:
 #### Disambiguation when a tx pulls inputs from multiple project chains
 
 A single milestone-level tx can include fee/collateral inputs from a sibling
-project's UTXO chain. `find_vendor_contract_from_inputs` collects every
-candidate `vendor_contract_id`, then scores each candidate by how many of the
-tx's metadata `body.milestones` keys (collected via
-`collect_milestone_id_hints`, `event_processor.rs:1450`) match milestones
-stored for that vendor contract. The best-scoring candidate wins; ties fall
-back to the first input.
+project's UTXO chain. `find_project_from_inputs` collects every candidate
+`project_db_id`, then scores each candidate by how many of the tx's metadata
+`body.milestones` keys (collected via `collect_milestone_id_hints` in
+`event_processor.rs`) match milestones stored for that project. The
+best-scoring candidate wins; ties fall back to the first input.
 
 #### Cold replay — when chain tracing can't reconstruct the link
 
-If a fresh local sync starts from a `STORE_CARDANO_SYNC_START_SLOT` far behind
-tip, by the time the indexer is processing event N some of its input UTXOs
-from earlier events may already have been pruned by YACI Store. The chain
-trace returns `None`; the event is still recorded in `treasury.events` (with
-`vendor_contract_id = NULL`) so nothing is silently dropped, but milestone
+The Postgres triggers installed by `install_utxo_history_triggers`
+(`api/src/services/sync.rs`) capture every script-address UTXO into
+`treasury.utxo_history` synchronously with YACI Store's INSERT, so the
+chain-trace input is always available regardless of pruning — *provided
+the triggers were armed before the relevant blocks were ingested*. If a
+fresh local sync runs against a database where YACI Store has already
+pruned UTXOs from before the triggers were installed, the chain trace can
+return `None`; the event is still recorded in `treasury.events` (with
+`project_db_id = NULL`) so nothing is silently dropped, but milestone
 state flags can't be updated. See
-[`docs/known-issues.md` `KI-CR-01`](known-issues.md#ki-cr-01--fresh-local-sync-cant-reconstruct-fully-pruned-chains).
+[`docs/known-issues.md` `KI-CR-01`](known-issues.md) and `KI-UTX-01`.
 
 ### Stage 6: API Request Flow
 
@@ -417,24 +438,24 @@ state flags can't be updated. See
 │                           API REQUEST FLOW                                   │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-   Client Request: GET /api/v1/vendor-contracts/EC-0008-25
+   Client Request: GET /api/v1/projects/EC-0008-25
                                       │
                                       ▼
    ┌─────────────────────────────────────────────────────────────────────────┐
    │                         AXUM ROUTER                                      │
    │                                                                          │
    │   .nest("/api/v1", routes::v1::router())                                │
-   │     → /vendor-contracts/:project_id → get_vendor_contract()             │
+   │     → /projects/:project_id → get_project()                             │
    └─────────────────────────────────────────────────────────────────────────┘
                                       │
                                       ▼
    ┌─────────────────────────────────────────────────────────────────────────┐
-   │                  routes/v1/vendor_contracts.rs                           │
+   │                  routes/v1/projects.rs                                   │
    │                                                                          │
-   │   pub async fn get_vendor_contract(                                     │
+   │   pub async fn get_project(                                             │
    │       Extension(pool): Extension<PgPool>,                               │
    │       Path(project_id): Path<String>,                                   │
-   │   ) -> Result<Json<ApiResponse<VendorContractDetail>>, StatusCode>      │
+   │   ) -> Result<Json<ApiResponse<ProjectDetail>>, ApiError>               │
    └─────────────────────────────────────────────────────────────────────────┘
                                       │
                                       │ SQL Query
@@ -442,7 +463,7 @@ state flags can't be updated. See
    ┌─────────────────────────────────────────────────────────────────────────┐
    │                        PostgreSQL                                        │
    │                                                                          │
-   │   SELECT * FROM treasury.v_vendor_contracts_summary                     │
+   │   SELECT * FROM treasury.v_projects_summary                             │
    │   WHERE project_id = 'EC-0008-25'                                       │
    └─────────────────────────────────────────────────────────────────────────┘
                                       │
@@ -475,43 +496,45 @@ state flags can't be updated. See
 │                         TREASURY SCHEMA (treasury.*)                         │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-   ┌─────────────────────┐
-   │ treasury_contracts  │
+   ┌─────────────────────┐    ┌─────────────────────┐
+   │ treasury_contracts  │    │   vendor_contracts  │  (Singleton PSSC row)
+   ├─────────────────────┤    ├─────────────────────┤
+   │ id (PK)             │    │ id (PK)             │
+   │ contract_instance   │◄─┐ │ treasury_id (FK)    │─┐
+   │ stake_credential    │  │ │ address (PSSC, uniq)│ │
+   │ publish_tx_hash     │  │ │ stake_credential    │ │
+   │ initialized_at      │  │ └─────────────────────┘ │
+   └─────────────────────┘  │                         │
+            │               │                         │
+            │ 1:N           │                         │
+            ▼               │                         │
+   ┌─────────────────────┐  │   ┌─────────────────────┐
+   │      projects       │  │   │      events         │
+   ├─────────────────────┤  │   ├─────────────────────┤
+   │ id (PK)             │◄─┼───│ project_db_id       │
+   │ treasury_id (FK)    │──┘   │ treasury_id (FK)    │
+   │ project_id (unique) │      │ milestone_id (FK)   │─┐
+   │ project_name        │      │ tx_hash (unique)    │ │
+   │ vendor_address      │      │ event_type          │ │
+   │ status              │      │ slot                │ │
+   │ contract_address    │      │ destination (JSONB) │ │
+   │ vendor_payment_*    │      │ metadata (JSONB)    │ │
+   └─────────────────────┘      └─────────────────────┘ │
+            │                                           │
+            │ 1:N                                       │
+            ▼                                           │
+   ┌─────────────────────┐                              │
+   │     milestones      │◄─────────────────────────────┘
    ├─────────────────────┤
    │ id (PK)             │
-   │ contract_instance   │◄─────────────────────────────────────────────┐
-   │ stake_credential    │                                              │
-   │ publish_tx_hash     │                                              │
-   │ initialized_at      │                                              │
-   └─────────────────────┘                                              │
-            │                                                           │
-            │ 1:N                                                       │
-            ▼                                                           │
-   ┌─────────────────────┐         ┌─────────────────────┐             │
-   │  vendor_contracts   │         │      events         │             │
-   ├─────────────────────┤         ├─────────────────────┤             │
-   │ id (PK)             │◄────────│ vendor_contract_id  │             │
-   │ treasury_id (FK)    │─────────│ treasury_id (FK)    │─────────────┘
-   │ project_id (unique) │         │ milestone_id (FK)   │─────┐
-   │ project_name        │         │ tx_hash (unique)    │     │
-   │ vendor_address      │         │ event_type          │     │
-   │ status              │         │ slot                │     │
-   │ contract_address    │         │ metadata (JSONB)    │     │
-   └─────────────────────┘         └─────────────────────┘     │
-            │                                                   │
-            │ 1:N                                               │
-            ▼                                                   │
-   ┌─────────────────────┐                                     │
-   │     milestones      │◄────────────────────────────────────┘
-   ├─────────────────────┤
-   │ id (PK)             │
-   │ vendor_contract_id  │
+   │ project_db_id       │
    │ milestone_id        │
    │ label               │
    │ amount_lovelace     │
    │ time_limit          │
    │ withdrawn           │
    │ evidence_provided   │
+   │ paused              │
    │ archived            │
    │ withdraw_tx_hash    │
    │ complete_tx_hash    │
@@ -519,13 +542,14 @@ state flags can't be updated. See
    └─────────────────────┘
 
    ┌─────────────────────┐
-   │       utxos         │  (Tracks UTXO chain for event linking)
+   │    utxo_history     │  (Trigger-captured UTXO history at script addresses)
    ├─────────────────────┤
-   │ tx_hash (PK)        │
-   │ output_index (PK)   │
-   │ vendor_contract_id  │
+   │ tx_hash             │
+   │ output_index        │
+   │ project_db_id       │
    │ address             │
    │ lovelace_amount     │
+   │ inline_datum_cbor   │
    │ spent               │
    │ spent_tx_hash       │
    └─────────────────────┘

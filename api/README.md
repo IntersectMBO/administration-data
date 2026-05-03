@@ -78,22 +78,37 @@ Returns the health status of the API.
 
 #### `GET /api/v1/status`
 
-Get API status and sync information.
+Get API status and sync information. Three time domains are surfaced separately:
+`database.checked_at` (server-side), `sync.heartbeat` (server-side, last sync poll),
+`sync.last_event_processed` (on-chain block time of most recent processed TOM event),
+and `chain.indexer_time` (on-chain block time of YACI Store's tip).
 
 **Response:**
 ```json
 {
   "data": {
-    "api_version": "1.0.0",
-    "database_connected": true,
-    "last_sync_slot": 163964156,
-    "last_sync_block": 12296746,
-    "last_sync_time": 1704067200,
-    "total_events": 21,
-    "total_vendor_contracts": 5
+    "api_version": "2.0.0",
+    "database": {
+      "connected": true,
+      "checked_at": "2026-05-01T10:30:00Z"
+    },
+    "sync": {
+      "heartbeat": "2026-05-01T10:29:55Z",
+      "last_event_processed": { "unix": 1777623100, "iso": "2026-05-01T08:11:40Z" }
+    },
+    "chain": {
+      "indexer_block": 12296746,
+      "indexer_slot": 163964156,
+      "indexer_time": { "unix": 1777623200, "iso": "2026-05-01T08:13:20Z" }
+    },
+    "totals": {
+      "events": 411,
+      "projects": 42,
+      "events_by_type": { "fund": 42, "complete": 189, "withdraw": 129, "pause": 63, "resume": 32 }
+    }
   },
   "meta": {
-    "timestamp": "2026-01-28T10:30:00Z"
+    "timestamp": "2026-05-01T10:30:00Z"
   }
 }
 ```
@@ -116,18 +131,18 @@ Get treasury contract details with statistics and financials.
     "stake_credential": "8583857e4a12ffe1e6f641a1785a0f2f036c565cfbe6ff9db8e5a469",
     "status": "active",
     "publish_tx_hash": "abc123...",
-    "publish_time": 1704067200,
+    "publish_time": { "unix": 1704067200, "iso": "2024-01-01T00:00:00Z" },
     "initialized_tx_hash": "def456...",
-    "initialized_at": 1704067300,
+    "initialized_at": { "unix": 1704067300, "iso": "2024-01-01T00:01:40Z" },
     "permissions": { ... },
     "statistics": {
-      "vendor_contract_count": 10,
-      "active_contracts": 8,
-      "completed_contracts": 2,
-      "cancelled_contracts": 0,
+      "project_count": 42,
+      "active_contracts": 35,
+      "completed_contracts": 6,
+      "cancelled_contracts": 1,
       "total_events": 45,
       "utxo_count": 12,
-      "last_event_time": 1704153600
+      "last_event_time": { "unix": 1704153600, "iso": "2024-01-02T00:00:00Z" }
     },
     "financials": {
       "balance_lovelace": 264568247000000
@@ -174,11 +189,37 @@ Get treasury-level events (publish, initialize, sweep, reorganize).
 
 ---
 
-### Vendor Contracts
+### Vendor Contract (singleton PSSC)
 
-#### `GET /api/v1/vendor-contracts`
+#### `GET /api/v1/vendor-contract`
 
-List all vendor contracts (projects) with pagination and filtering.
+Get the shared vendor contract — the singleton on-chain script address every project sits at, plus a quick rollup of the projects bound to it.
+
+**Response:**
+```json
+{
+  "data": {
+    "address": "addr1x...",
+    "stake_credential": "8583857e...",
+    "projects": {
+      "total": 42,
+      "by_status": { "active": 35, "completed": 6, "cancelled": 1 }
+    }
+  },
+  "meta": { ... }
+}
+```
+
+**Errors:**
+- `404 Not Found` - Vendor contract not yet known (first fund event has not been processed)
+
+---
+
+### Projects
+
+#### `GET /api/v1/projects`
+
+List all projects (one per `fund` event) with pagination and filtering.
 
 **Query Parameters:**
 
@@ -195,7 +236,7 @@ List all vendor contracts (projects) with pagination and filtering.
 
 **Example:**
 ```bash
-curl "http://localhost:8080/api/v1/vendor-contracts?status=active&search=community&limit=10"
+curl "http://localhost:8080/api/v1/projects?status=active&search=community&limit=10"
 ```
 
 **Response:**
@@ -211,7 +252,7 @@ curl "http://localhost:8080/api/v1/vendor-contracts?status=active&search=communi
       "contract_address": "addr1x...",
       "status": "active",
       "fund_tx_hash": "abc123...",
-      "fund_time": 1704067200,
+      "fund_time": { "unix": 1704067200, "iso": "2024-01-01T00:00:00Z" },
       "initial_amount_lovelace": 1000000000000,
       "milestones_summary": {
         "total": 5,
@@ -230,7 +271,7 @@ curl "http://localhost:8080/api/v1/vendor-contracts?status=active&search=communi
       "treasury": {
         "contract_instance": "9e65e4ed..."
       },
-      "last_event_time": 1704153600,
+      "last_event_time": { "unix": 1704153600, "iso": "2024-01-02T00:00:00Z" },
       "event_count": 8
     }
   ],
@@ -244,9 +285,9 @@ curl "http://localhost:8080/api/v1/vendor-contracts?status=active&search=communi
 }
 ```
 
-#### `GET /api/v1/vendor-contracts/:project_id`
+#### `GET /api/v1/projects/:project_id`
 
-Get detailed information about a specific vendor contract.
+Get detailed information about a specific project.
 
 **Path Parameters:**
 
@@ -256,14 +297,22 @@ Get detailed information about a specific vendor contract.
 
 **Response:** Same as list item but with additional fields:
 - `other_identifiers`: Related project IDs
+- `vendor_payment_key_hash`: Vendor payment key hash from inline datum
 - `created_at`, `updated_at`: Timestamps
 
 **Errors:**
-- `404 Not Found` - Vendor contract not found
+- `404 Not Found` - Project not found
 
-#### `GET /api/v1/vendor-contracts/:project_id/milestones`
+#### `GET /api/v1/projects/:project_id/milestones`
 
-Get all milestones for a specific project.
+Get all (non-archived) milestones for a specific project. Paginated.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `page` | integer | 1 | Page number |
+| `limit` | integer | 50 | Results per page (max: 100) |
 
 **Response:**
 ```json
@@ -280,30 +329,35 @@ Get all milestones for a specific project.
       "time_limit": 1704240000000,
       "withdrawn": true,
       "evidence_provided": true,
+      "paused": false,
       "archived": false,
       "completion": {
         "tx_hash": "abc123...",
-        "time": 1704067200,
+        "time": { "unix": 1704067200, "iso": "2024-01-01T00:00:00Z" },
         "description": "Research completed successfully",
         "evidence": [...]
       },
       "withdrawal": {
         "tx_hash": "def456...",
-        "time": 1704153600,
+        "time": { "unix": 1704153600, "iso": "2024-01-02T00:00:00Z" },
         "amount_lovelace": 200000000000
       },
       "archive_info": null,
+      "pause_history": null,
       "project": {
         "project_id": "EC-0008-25",
         "project_name": "Community Hub Development"
       }
     }
   ],
+  "pagination": { ... },
   "meta": { ... }
 }
 ```
 
-#### `GET /api/v1/vendor-contracts/:project_id/events`
+`pause_history` is non-null when at least one pause/resume event has been recorded for the milestone. It carries `currently_paused`, `last_pause_tx_hash` / `last_pause_time` and `last_resume_tx_hash` / `last_resume_time`.
+
+#### `GET /api/v1/projects/:project_id/events`
 
 Get event history for a specific project.
 
@@ -315,9 +369,9 @@ Get event history for a specific project.
 | `limit` | integer | 50 | Results per page |
 | `type` | string | - | Filter by event type |
 
-#### `GET /api/v1/vendor-contracts/:project_id/utxos`
+#### `GET /api/v1/projects/:project_id/utxos`
 
-Get current (unspent) UTXOs for a specific project.
+Get current (unspent) UTXOs for a specific project. Paginated.
 
 ---
 
@@ -338,10 +392,22 @@ List all milestones across all projects.
 | `archived` | boolean | false | Filter by archived status (defaults to false) |
 | `project_id` | string | - | Filter by project ID |
 | `sort` | string | - | Sort field: `milestone_order`, `complete_time`, `withdraw_time`, `amount` |
+| `from_time` | integer | - | Filter by milestone time (Unix timestamp, from). Matches whichever of `complete_time` or `withdraw_time` is set on the row. |
+| `to_time` | integer | - | Filter by milestone time (Unix timestamp, to). |
 
-#### `GET /api/v1/milestones/:id`
+#### `GET /api/v1/milestones/:project_id`
 
-Get a specific milestone by database ID.
+List milestones for a specific project (paginated). Convenience endpoint mirroring `/api/v1/projects/{project_id}/milestones`, served under the `/milestones/` root.
+
+**Path Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `project_id` | string | Project identifier (e.g., "EC-0008-25") |
+
+#### `GET /api/v1/milestones/by-id/:id`
+
+Get a specific milestone by integer database ID. The integer ID is rarely useful to clients; prefer the project-scoped lookup above.
 
 **Path Parameters:**
 
@@ -367,6 +433,7 @@ List all events with full context.
 | `project_id` | string | - | Filter by project ID |
 | `from_time` | integer | - | Filter by time (Unix timestamp, from) |
 | `to_time` | integer | - | Filter by time (Unix timestamp, to) |
+| `q` | string | - | Full-text search across `reason`, `destination`, and raw `metadata` (case-insensitive substring) |
 
 **Response:**
 ```json
@@ -377,7 +444,7 @@ List all events with full context.
       "tx_hash": "abc123...",
       "slot": 163964156,
       "block_number": 12296746,
-      "block_time": 1704067200,
+      "block_time": { "unix": 1704067200, "iso": "2024-01-01T00:00:00Z" },
       "event_type": "fund",
       "amount_lovelace": 1000000000000,
       "reason": null,
@@ -399,6 +466,8 @@ List all events with full context.
   "meta": { ... }
 }
 ```
+
+`destination` is a JSONB `{label, details}` object preserved as-is from the TOM metadata; populated on `disburse` events only.
 
 #### `GET /api/v1/events/recent`
 
@@ -439,30 +508,36 @@ Get comprehensive statistics across all data.
       "active_count": 1,
       "disbursed_count": 3
     },
+    "vendor_contracts": {
+      "total_count": 1,
+      "address": "addr1x...",
+      "project_count": 42,
+      "utxo_history_count": 1235,
+      "unspent_utxo_count": 449,
+      "current_balance_lovelace": 600000000000
+    },
     "projects": {
-      "total_count": 10,
-      "active_count": 8,
-      "completed_count": 2,
+      "total_count": 42,
+      "active_count": 35,
+      "completed_count": 6,
       "paused_count": 0,
-      "cancelled_count": 0
+      "cancelled_count": 1
     },
     "milestones": {
-      "total_count": 50,
-      "pending_count": 20,
-      "completed_count": 15,
-      "withdrawn_count": 15
+      "total_count": 364,
+      "pending_count": 100,
+      "completed_count": 60,
+      "withdrawn_count": 204
     },
     "events": {
-      "on_chain_count": 45,
-      "processed_count": 45,
+      "on_chain_count": 411,
+      "processed_count": 411,
       "by_type": {
-        "fund": 10,
-        "complete": 15,
-        "disburse": 15,
-        "publish": 1,
-        "initialize": 1,
-        "pause": 2,
-        "resume": 1
+        "fund": 42,
+        "complete": 189,
+        "withdraw": 129,
+        "pause": 63,
+        "resume": 32
       }
     },
     "financials": {
@@ -473,12 +548,14 @@ Get comprehensive statistics across all data.
     "sync": {
       "last_slot": 163964156,
       "last_block": 12296746,
-      "last_updated": "2024-01-15T12:00:00Z"
+      "last_updated": "2026-05-01T08:11:40Z"
     }
   },
   "meta": { ... }
 }
 ```
+
+`vendor_contracts` is the singleton-PSSC rollup (see `GET /api/v1/vendor-contract`); `projects` counts rows in `treasury.projects`.
 
 ---
 
@@ -514,27 +591,35 @@ The API runs a background sync task (`api/src/services/sync.rs::run_sync_loop`)
 that drives event ingestion. The pipeline has four stages:
 
 1. **Pre-fetch UTXOs** — `EventProcessor::pre_fetch_utxos`
-   (`api/src/services/event_processor.rs:1209`) batches the tx_hashes of
+   (`api/src/services/event_processor.rs`) batches the tx_hashes of
    pending TOM events and copies their outputs and inputs from
-   `yaci_store.address_utxo` into `treasury.utxos`. This captures UTXO data
-   before YACI Store can prune spent UTXOs (~2160 blocks / ~10 days).
-2. **Dispatch** — `process_event` (`event_processor.rs:82`) reads
+   `yaci_store.address_utxo` into `treasury.utxo_history`. This is a
+   defensive backstop on top of the Postgres triggers (`install_utxo_history_triggers`
+   in `api/src/services/sync.rs`) that capture every script-address UTXO
+   into `treasury.utxo_history` synchronously with YACI Store's INSERT.
+2. **Dispatch** — `process_event` (`event_processor.rs`) reads
    `body.body.event` and delegates to a per-event handler. Treasury-level
    events (`publish`, `initialize`, `disburse`, `sweep`, `reorganize`) write
-   to `treasury_contracts` + `events`; vendor-level events write to
-   `vendor_contracts` + `milestones` + `events`.
-3. **Vendor-contract resolution** — milestone-level events
-   (`complete`/`withdraw`/`pause`/`resume`) take their `vendor_contract_id`
+   to `treasury_contracts` + `events`; project-level events write to
+   `projects` + `milestones` + `events`.
+3. **Project resolution** — milestone-level events
+   (`complete`/`withdraw`/`pause`/`resume`) take their `project_db_id`
    from `body.identifier` when present, otherwise from
-   `find_vendor_contract_from_inputs` (`:1047`), which traces input UTXOs
-   back to the seed planted by the project's `fund` event. When multiple
-   project chains feed a single tx (sibling-project fee inputs, etc.) the
-   trace disambiguates by scoring candidate vendor_contracts against the
-   metadata's milestone keys (`collect_milestone_id_hints`, `:1450`).
-4. **Insert** — `insert_event_full` (`:999`) writes one row per
-   `tx_hash` into `treasury.events` with `ON CONFLICT (tx_hash) DO UPDATE`,
-   preserving idempotency. Events are recorded even when the chain trace
-   fails (`vendor_contract_id IS NULL`) so nothing is silently dropped.
+   `find_project_from_inputs`, which traces input UTXOs back to the seed
+   planted by the project's `fund` event. When multiple project chains
+   feed a single tx (sibling-project fee inputs, etc.) the trace
+   disambiguates by scoring candidate projects against the metadata's
+   milestone keys (`collect_milestone_id_hints`).
+4. **Insert** — `insert_event_full` writes one row per `tx_hash` into
+   `treasury.events` with `ON CONFLICT (tx_hash) DO UPDATE`, preserving
+   idempotency. Events are recorded even when the chain trace fails
+   (`project_db_id IS NULL`) so nothing is silently dropped.
+
+In addition to the incremental loop, a separate `tokio::spawn` task runs
+`sync_all_events` every 10 minutes as an idempotent backfill — any event
+that wedged the incremental loop (e.g. a postgres restart mid-batch) is
+recovered by the next full re-sync via the `ON CONFLICT DO UPDATE` chain.
+See `KI-SY-02` in `docs/known-issues.md`.
 
 Datum parsing (milestone amounts, time limits, paused flags, vendor payment
 key hash) lives in `api/src/parsers/datum.rs`; address parsing
@@ -614,10 +699,11 @@ The API queries the `treasury` schema:
 | Table | Description |
 |-------|-------------|
 | `treasury.treasury_contracts` | Treasury reserve contracts (TRSC) |
-| `treasury.vendor_contracts` | Vendor/project contracts (PSSC) |
-| `treasury.milestones` | Project milestones |
-| `treasury.events` | All TOM event audit log |
-| `treasury.utxos` | UTXO tracking for event linking |
+| `treasury.vendor_contracts` | Singleton row for the shared PSSC script address |
+| `treasury.projects` | One row per `fund` event (the 42 active projects) |
+| `treasury.milestones` | Project milestones; FK to `projects.id` via `project_db_id` |
+| `treasury.events` | All TOM event audit log; FK to `projects.id` via `project_db_id`; `destination` is JSONB |
+| `treasury.utxo_history` | Persistent UTXO history (Postgres-trigger captured) for chain trace + datum cache |
 | `treasury.sync_status` | Sync progress tracking |
 
 ### Views
@@ -625,7 +711,8 @@ The API queries the `treasury` schema:
 | View | Description |
 |------|-------------|
 | `v_treasury_summary` | Treasury with statistics and financials |
-| `v_vendor_contracts_summary` | Projects with milestone counts and financials |
+| `v_projects_summary` | Projects with milestone counts and financials |
 | `v_events_with_context` | Events with treasury/project/milestone context |
+| `v_recent_events` | Events with context, ordered by slot DESC |
 | `v_financial_summary` | Allocated vs withdrawn vs remaining |
 | `v_milestone_timeline` | Milestones with project context |

@@ -124,22 +124,29 @@ Interactive documentation available at `/docs` (Swagger UI).
 | `GET /api/v1/treasury/utxos` | Treasury UTXOs |
 | `GET /api/v1/treasury/events` | Treasury-level events |
 
-### Vendor Contracts (Projects)
+### Vendor Contract (singleton PSSC)
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /api/v1/vendor-contracts` | List all vendor contracts (with pagination, filtering, search) |
-| `GET /api/v1/vendor-contracts/:project_id` | Get vendor contract details |
-| `GET /api/v1/vendor-contracts/:project_id/milestones` | Get project milestones |
-| `GET /api/v1/vendor-contracts/:project_id/events` | Get project event history |
-| `GET /api/v1/vendor-contracts/:project_id/utxos` | Get project UTXOs |
+| `GET /api/v1/vendor-contract` | Shared PSSC script address + project rollup by status |
+
+### Projects
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/v1/projects` | List all projects (with pagination, filtering, search) |
+| `GET /api/v1/projects/:project_id` | Get project details |
+| `GET /api/v1/projects/:project_id/milestones` | Get project milestones |
+| `GET /api/v1/projects/:project_id/events` | Get project event history |
+| `GET /api/v1/projects/:project_id/utxos` | Get project UTXOs |
 
 ### Milestones
 
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/v1/milestones` | List all milestones (with pagination, filtering) |
-| `GET /api/v1/milestones/:id` | Get milestone details |
+| `GET /api/v1/milestones/:project_id` | List milestones for a project (paginated) |
+| `GET /api/v1/milestones/by-id/:id` | Get milestone by integer database ID |
 
 ### Events
 
@@ -222,10 +229,11 @@ The system uses two schemas:
 | Table | Description |
 |-------|-------------|
 | `treasury.treasury_contracts` | Treasury reserve contracts (TRSC) |
-| `treasury.vendor_contracts` | Vendor/project contracts (PSSC) |
-| `treasury.milestones` | Project milestones (4 independent boolean flags + archive model) |
-| `treasury.events` | All TOM event audit log |
-| `treasury.utxos` | UTXO tracking for event linking (chain trace + datum cache) |
+| `treasury.vendor_contracts` | Singleton row for the shared PSSC script address (one per deployment) |
+| `treasury.projects` | One row per `fund` event (e.g. `EC-0008-25`); holds project metadata |
+| `treasury.milestones` | Project milestones (4 independent boolean flags + archive model). FKs to `projects` via `project_db_id` |
+| `treasury.events` | All TOM event audit log. FKs to `projects` via `project_db_id`; `destination` is JSONB |
+| `treasury.utxo_history` | Persistent UTXO history (populated by Postgres triggers on `yaci_store.address_utxo`) for chain trace + datum cache |
 | `treasury.sync_status` | Heartbeat: per-stream `last_slot` / `last_block` / `updated_at` |
 
 ### Connecting to Database
@@ -247,11 +255,11 @@ SELECT * FROM yaci_store.block ORDER BY number DESC LIMIT 5;
 -- Treasury summary
 SELECT * FROM treasury.v_treasury_summary;
 
--- Vendor contracts with financials
+-- Projects with financials
 SELECT project_id, project_name, status,
        initial_amount_lovelace / 1000000 as allocated_ada,
        total_withdrawn_lovelace / 1000000 as withdrawn_ada
-FROM treasury.v_vendor_contracts_summary;
+FROM treasury.v_projects_summary;
 
 -- Recent events
 SELECT * FROM treasury.v_events_with_context
@@ -277,7 +285,7 @@ This reduces database size by ~95% while keeping all treasury data.
 
 ## Gotchas
 
-- **Cold replay vs continuous operation**: a fresh local sync from an old `STORE_CARDANO_SYNC_START_SLOT` cannot reconstruct UTXO chains whose inputs YACI Store has already pruned. A fraction of historical milestone events will land with `vendor_contract_id = NULL`. See [`docs/known-issues.md`](docs/known-issues.md) `KI-CR-01` and `CLAUDE.md` for details.
+- **Cold replay vs continuous operation**: a fresh local sync from an old `STORE_CARDANO_SYNC_START_SLOT` cannot reconstruct UTXO chains whose inputs were pruned *before* the `treasury.utxo_history` triggers were installed. With the triggers armed, every script-address UTXO YACI Store inserts is captured before pruning runs. To recover pre-existing pruned data, wipe the volume and re-sync with the API running so the triggers arm before YACI Store ingests. See [`docs/known-issues.md`](docs/known-issues.md) `KI-CR-01` / `KI-UTX-01`.
 - **Stale-looking sync timestamp**: `treasury.sync_status.updated_at` only bumps when new events arrive. A long delta does not mean the sync loop is dead. See `KI-SY-01`.
 
 ## License

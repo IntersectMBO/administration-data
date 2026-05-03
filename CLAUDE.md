@@ -31,12 +31,13 @@ Cardano Node → YACI Store indexer → PostgreSQL (yaci_store schema)
 This project implements the **Treasury Oversight Metadata (TOM)** standard, using CIP-100 metadata label **1694**.
 
 ### Contract Hierarchy
-- **Treasury Contract (TRSC)** → at a unique script address, holds treasury reserve funds
-- **Vendor Contract (PSSC)** → **ONE shared script address for ALL projects** (not one per project)
+- **Treasury Contract (TRSC)** → at a unique script address, holds treasury reserve funds. Stored in `treasury.treasury_contracts`.
+- **Vendor Contract (PSSC)** → **ONE shared script address for ALL projects** (not one per project). Stored in `treasury.vendor_contracts` (singleton row: `address`, `stake_credential`).
   - Each `fund` tx creates UTXOs at the shared PSSC address
   - UTXOs belong to specific projects, distinguished by inline datum, NOT by address
-  - UTXO chain tracking (`find_vendor_contract_from_inputs`) links events to projects by tracing spent inputs
-- **Milestones** → belong to a vendor contract/project
+  - UTXO chain tracking (`find_project_from_inputs`) links events to projects by tracing spent inputs
+- **Project** → one row per `fund` event (e.g. `EC-0008-25`). Stored in `treasury.projects`. Foreign-keyed from milestones, events, and UTXO history via `project_db_id`.
+- **Milestones** → belong to a project
 
 ### Vendor Naming
 - `vendor.name` does **not exist** in the TOM spec — code extracts it but always gets null
@@ -161,7 +162,7 @@ Never modify `yaci-store.jar` or YACI Store internals. Primary network: Mainnet 
 - **Port 5433**: PostgreSQL is on host port 5433, not 5432.
 - **`.env` not committed**: copy `.env.example` and configure before first run.
 - **UTXO pruning**: YACI Store prunes spent UTXOs — historical UTXO data may not be available.
-- **Cold replay vs continuous operation**: The milestone-event chain trace (`find_vendor_contract_from_inputs`) needs UTXO history to link withdraw/complete/pause/resume to a vendor contract. A continuously-running deployment captures each output before YACI Store prunes it; a fresh local sync from an old `STORE_CARDANO_SYNC_START_SLOT` cannot reconstruct chains whose inputs were pruned before sync caught up. Result: a fraction of historical milestone events will land in `treasury.events` with `vendor_contract_id = NULL` and won't update `treasury.milestones` flags. Mitigations: keep the API running, or pick a more recent start slot.
+- **Cold replay vs continuous operation**: The milestone-event chain trace (`find_project_from_inputs`) needs UTXO history to link withdraw/complete/pause/resume to a project. The Postgres triggers installed by `install_utxo_history_triggers` (in `api/src/services/sync.rs`) capture every script-address UTXO into `treasury.utxo_history` synchronously with YACI Store's INSERT, so pruning no longer drops chain-trace inputs. Triggers only protect from the moment they're armed — to recover pre-existing pruned data, wipe the database volume and re-sync with the API running so the triggers arm before YACI Store ingests. See [`docs/known-issues.md`](docs/known-issues.md) `KI-CR-01` and `KI-UTX-01`.
 - **Large JAR**: `indexer/yaci-store.jar` is ~108MB and committed to the repo. Don't regenerate unnecessarily.
 - **Inline datums**: `store.script.enabled=true` in YACI Store config enables milestone datum data (amounts, time limits, pause flags). Requires full re-sync after enabling.
 - **Milestone archiving**: Filter `WHERE NOT archived` for current milestones. Archived rows are historical versions.

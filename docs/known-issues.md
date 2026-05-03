@@ -75,7 +75,7 @@ allows NULL.
 
 | Column | When NULL is expected | When NULL is anomalous |
 |---|---|---|
-| `contract_address`, `stake_credential` | Before `initialize` event | Initialize ran but neither `yaci_store.address_utxo` nor `treasury.utxos` had the script output (`event_processor.rs:169`) |
+| `contract_address`, `stake_credential` | Before `initialize` event | Initialize ran but neither `yaci_store.address_utxo` nor `treasury.utxo_history` had the script output (`process_initialize` in `event_processor.rs`) |
 | `publish_tx_hash`, `publish_time` | Treasury never published on chain | A publish event was received but didn't write — investigate |
 | `initialized_tx_hash`, `initialized_at` | Treasury never initialized | Same as above for initialize |
 | `permissions` | Publish metadata didn't include the field | Publish metadata included it but extraction failed |
@@ -362,7 +362,7 @@ FROM treasury.milestones;
   KI-MOD-01-affected projects where modify events introduced milestones
   with non-original IDs (MS-N gaps).
 - **Hypothesis:** `find_project_from_inputs`
-  (`event_processor.rs:1093`) uses `collect_milestone_id_hints` to
+  (`event_processor.rs`) uses `collect_milestone_id_hints` to
   disambiguate when chain trace finds multiple candidate projects (see
   KI-OC-03). When the event's milestone IDs (e.g., `MS-15`) appear in
   modify-created milestone rows on more than one project, the hint
@@ -415,7 +415,7 @@ FROM treasury.events GROUP BY 1 ORDER BY 1;
 #### KI-UTX-02 — `project_db_id` IS NULL on non-script UTXOs (by design)
 - **Why:** `pre_fetch_utxos` inserts every output of every TOM-event tx
   without `project_db_id`. The chain-trace seed (set later by
-  `process_fund` and `find_vendor_contract_from_inputs`) only fills it
+  `process_fund` and `find_project_from_inputs`) only fills it
   for outputs at the script address. Non-script change/fee outputs
   remain NULL by design — they aren't part of the chain.
 - **Currently affected:** 786 / 1235 rows. Not anomalous — expected.
@@ -478,7 +478,7 @@ The original analysis is preserved below.
   normaliser that wants to merge the two formats can use this offset.
 - **Effect on complete events:** of 189 complete events, 108 use `m-N` keys
   and 81 use `MS-N` keys. After the disambiguation hint to
-  `find_vendor_contract_from_inputs`, this no longer causes silent event
+  `find_project_from_inputs`, this no longer causes silent event
   drops (every event lands in `treasury.events`), but it surfaces as
   KI-VND-01 / KI-MIL-01 because the same projects have a different datum
   format the parser can't handle.
@@ -522,10 +522,10 @@ GROUP BY 1 ORDER BY 1;
 - A single complete/withdraw tx can take fee/collateral inputs from another
   project's UTXO chain. Without disambiguation, the older code attributed
   the event to whichever project's input came first.
-- **Mitigation in code:** `find_vendor_contract_from_inputs`
-  (`event_processor.rs:1047`) now scores candidate vendor_contract_ids
+- **Mitigation in code:** `find_project_from_inputs`
+  (`event_processor.rs`) now scores candidate `project_db_id`s
   against `body.milestones` keys and prefers the one whose stored milestones
-  match (`collect_milestone_id_hints` at `:1450`).
+  match (`collect_milestone_id_hints`).
 - **Currently affected:** observable indirectly via KI-EVT-02 = 0.
 
 ---
