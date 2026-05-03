@@ -1,44 +1,51 @@
 # Known issues — data quality and behavioural quirks
 
-> **Last refreshed:** 2026-05-02 (post five-bug-cascade fix; see KI-VND-01)
-> against commit `6db1581`+. Counts come from the local DB after the fix
-> landed. Rerun the per-entry repro SQL for fresh numbers.
+> **Last refreshed:** 2026-05-03 (post six-bug-cascade fix + true cold
+> resync) against commit `6db1581`+. Rerun the per-entry repro SQL for
+> fresh numbers.
 >
-> **Verified resolved this session:**
-> - **KI-VND-01** — `vendor_payment_key_hash` NULL: **10/42 → 1/42**
->   (the 1 is a data-corruption casualty; see KI-VND-05).
+> **Verified resolved by cold resync:**
+> - **KI-VND-01** — `vendor_payment_key_hash` NULL: **10/42 → 0/42**
 > - **KI-MIL-01 (datum-derived)** — NULL `amount_lovelace`/`time_limit`:
->   **136/386 → 16/364** (8 from KI-VND-05 corruption, 8 from KI-MOD-01
->   modify-event gap).
-> - **KI-EVT-01-residual** — partially resolved; the 4 remaining NULL
->   `project_db_id` events trace to KI-VND-05's corrupted projects.
+>   **136/386 → 16/364** (all 16 are KI-MOD-01 modify-event milestones).
+> - **KI-VND-05** — corrupted utxo_history datums: **resolved** by cold
+>   resync + the merged-source `get_script_utxo_for_tx` query (bug #6).
+> - **KI-EVT-01-residual** — 12/413 events still NULL, all clustered on
+>   the 2 KI-MOD-01-affected projects' descendants (slight regression
+>   from 4 pre-cold-resync — likely milestone-id-hint ambiguity in
+>   `find_project_from_inputs` when modify events introduce new IDs).
 > - **KI-SY-02** — Phase 1 (contiguous-success watermark) shipped.
-> - **KI-VND-04**, **KI-CR-01**, **KI-UTX-03** — all confirmed clean.
+> - **KI-VND-04**, **KI-CR-01**, **KI-UTX-03** — confirmed clean.
 >
-> **Five distinct bugs were the cause of KI-VND-01** (not the suspected
+> **Six distinct bugs were the cause of the KI-VND-01 cascade** (not a
 > single parser-strictness defect):
-> 1. Sync race during cold catch-up (`sync_all_events` only ran once at
->    startup; race with yaci_store's address_utxo ingestion meant fund
->    datums weren't visible at process-time).
+> 1. Sync race during cold catch-up — `sync_all_events` only ran once at
+>    startup, racing yaci_store's address_utxo ingestion. **Fix:**
+>    periodic 10-min `sync_all_events` task.
 > 2. `vendor_payment_key_hash VARCHAR(56)` rejected the 113-char
->    multi-key hash from UTXO-* projects.
-> 3. `get_script_utxo_for_tx` LIMIT 1 with no ORDER BY picked the
->    smaller change/treasury output (`d87980`, 3 bytes) instead of the
->    real vendor-contract output (kilobytes).
-> 4. `process_fund`'s seed-UTXO datum UPDATE blindly overwrote the
->    captured good datum with the bad one when bug #3 fired.
-> 5. `process_fund`'s milestone-update loop filtered `NOT withdrawn`,
->    breaking index alignment with the fund datum (which always
->    represents initial state) on periodic re-runs.
+>    multi-key hash. **Fix:** widened to `TEXT`.
+> 3. `get_script_utxo_for_tx` LIMIT 1 with no ORDER BY picked a tiny
+>    `d87980` reference output instead of the kilobyte project datum.
+>    **Fix:** ORDER BY length DESC.
+> 4. `process_fund` blindly overwrote a good captured datum with the bad
+>    one when bug #3 fired. **Fix:** preserve-larger-datum guard.
+> 5. `process_fund`'s milestone-update filtered `NOT withdrawn`, breaking
+>    index alignment with the fund datum on re-runs. **Fix:** removed.
+> 6. `get_script_utxo_for_tx` queried yaci_store first and never fell
+>    back to `treasury.utxo_history` even when the latter had a longer
+>    captured datum (only surfaces post-resync because some funds have
+>    a *spent-and-pruned* vendor-contract output and an *unspent*
+>    treasury reference output — yaci_store retains the small one).
+>    **Fix:** UNION ALL across both sources, ORDER BY length DESC.
 >
-> **Schema refactor note:** project-level columns moved out of
-> `treasury.vendor_contracts` into `treasury.projects`. Milestones and
-> events FK to `projects.id` via `project_db_id`. `treasury.utxos` was
-> removed in favour of `treasury.utxo_history`.
+> **Schema refactor note:** project-level columns moved from
+> `treasury.vendor_contracts` to `treasury.projects`. Milestones and
+> events FK via `project_db_id`. `treasury.utxos` removed in favour of
+> `treasury.utxo_history`.
 >
-> **Still open:** KI-OC-02 (on-chain limitation, can't fix), KI-VND-05
-> (2 corrupted-datum projects requiring true cold resync), KI-MOD-01
-> (modify-event milestones don't pick up datum updates).
+> **Still open:** KI-OC-02 (on-chain limitation, can't fix), KI-MOD-01
+> (modify-event milestones don't pick up datum updates), small KI-EVT-01
+> regression on KI-MOD-01-affected projects (12 NULL events).
 
 ## How to use this doc
 
@@ -90,16 +97,19 @@ FROM treasury.treasury_contracts;
 
 ### A.2 `treasury.projects` (formerly project-level cols on `vendor_contracts`)
 
-#### KI-VND-01 — `vendor_payment_key_hash` NULL on `UTXO-*` projects *(RESOLVED — five-bug cascade fixed)*
+#### KI-VND-01 — `vendor_payment_key_hash` NULL on `UTXO-*` projects *(RESOLVED — six-bug cascade, verified post cold resync)*
 
-The original "10/42 NULL" symptom turned out to be a cascade of five
+The original "10/42 NULL" symptom turned out to be a cascade of six
 separate bugs, not the single parser-strictness defect the previous
 analysis suspected. The parser was always correct on real CBOR (proven
-by three new fixture tests in `api/src/parsers/datum.rs`); a postgres
+by four fixture tests in `api/src/parsers/datum.rs`); a postgres
 column-width error in the `UPDATE` step was being swallowed by an
 all-or-nothing `match` and a misleading DEBUG-level log.
 
-##### The five bugs and their fixes
+After the cold resync verified all six fixes work end-to-end:
+**0/42 NULL key hashes, 0 parse errors.**
+
+##### The six bugs and their fixes
 
 1. **Sync race during cold catch-up** — `sync_all_events` ran once at
    API startup. During catch-up, `yaci_store.transaction_metadata` was
@@ -143,6 +153,21 @@ all-or-nothing `match` and a misleading DEBUG-level log.
    **Fix:** removed `AND NOT withdrawn` from the select. The fund tx's
    datum represents *initial* state; we always update by
    `milestone_order` regardless of current withdrawn flag.
+6. **`get_script_utxo_for_tx` never preferred `utxo_history` over
+   yaci_store when both had a row** — the yaci_store query ran first
+   and returned whatever was there. For some fund txs (e.g.
+   `b39d013c…`, `5bc5a75e…`) the *vendor-contract* output was spent and
+   pruned from yaci_store but captured by the trigger into
+   utxo_history; the *unspent* treasury-reference output (`d87980`,
+   3 bytes) survived in yaci_store. Result: yaci_store returned the
+   trivial datum and we never consulted utxo_history's real one.
+   This bug was invisible on the first cold-resync test because the
+   spent-and-pruned outputs were re-fetched while the trigger was
+   armed; it surfaced only when querying for fund-time state of older
+   txs after their vendor-contract outputs had since been spent.
+   **Fix:** `UNION ALL` yaci_store and utxo_history in a single query,
+   `ORDER BY length(datum) DESC LIMIT 1`. Source-agnostic: always picks
+   the longer datum across both.
 
 ##### Defensive hardening also landed
 
@@ -155,22 +180,22 @@ all-or-nothing `match` and a misleading DEBUG-level log.
   `treasury.milestones` for SQL-queryable diagnostics.
 - **`tracing::debug!` → `tracing::warn!`** for parse failures so they
   appear in default logs.
-- **Three real-CBOR fixture tests** in `api/src/parsers/datum.rs`
-  (UTXO-EMI-0001-25, UTXO-EC-0002-25-01, partial-parse smoke test).
+- **Four real-CBOR fixture tests** in `api/src/parsers/datum.rs`
+  (UTXO-EMI-0001-25, UTXO-EC-0002-25-01, UTXO-EC-0002-25-03,
+  partial-parse smoke test).
 
-##### Verified counts (after fix landed + 2 sync_all_events runs)
+##### Verified counts (after cold resync from `STORE_CARDANO_SYNC_START_SLOT`)
 
 | Metric | Before | After |
 |---|---:|---:|
-| `treasury.projects` NULL `vendor_payment_key_hash` | 10 / 42 | **1 / 42** |
-| `treasury.projects.datum_parse_error` set | n/a | **2 / 42** |
+| `treasury.projects` NULL `vendor_payment_key_hash` | 10 / 42 | **0 / 42** |
+| `treasury.projects.datum_parse_error` set | n/a | **0 / 42** |
 | `treasury.milestones` NULL `amount_lovelace` (active) | 136 / 386 | **16 / 364** |
 
-The remaining 1 NULL key hash + 16 NULL milestone amounts are
-concentrated in the 2 projects flagged by KI-VND-05 (data-corruption
-casualties of bug #4 before it was fixed) and 1 project surfaced by
-KI-MOD-01 (modify events create new milestone rows that don't pick up
-the new contract output's datum).
+The remaining 16 NULL milestone amounts are all from KI-MOD-01 (modify
+events created new milestone rows with new IDs that don't pick up the
+new contract output's datum). 8 each on `UTXO-EC-0002-25-03` and
+`UTXO-EC-0002-25-04`.
 
 ##### Repro queries
 
@@ -186,31 +211,24 @@ WHERE NOT m.archived AND m.amount_lovelace IS NULL
 GROUP BY p.project_id ORDER BY 2 DESC;
 ```
 
-#### KI-VND-05 — Datum corruption from prior bug #4 *(OPEN — requires cold resync to recover)*
-- **Affected:** `UTXO-EC-0002-25-03` (fund tx `b39d013c…`) and
-  `EC-0013(1,2,7)-25` (fund tx `5bc5a75e…`). Their
-  `treasury.utxo_history.inline_datum_cbor` is currently `d87980` (6
-  bytes — empty `Constr(0, [])`) instead of the original kilobyte-scale
-  project datum.
-- **Why:** before bug #4 was fixed, a periodic re-run of `process_fund`
-  picked the wrong UTXO (bug #3) and overwrote the good captured datum
-  with the empty change-output datum (bug #4). yaci_store has since
-  pruned the original outputs, so the datum can't be re-fetched from
-  the local DB.
-- **Recovery:** wipe the postgres volume and re-sync from
-  `STORE_CARDANO_SYNC_START_SLOT`. The triggers (KI-UTX-01) capture
-  the original outputs before pruning, and the now-fixed `process_fund`
-  preserves them.
-  ```bash
-  ./dev.sh stop
-  docker volume rm administration-data_postgres_data
-  ./dev.sh start
-  ```
-- **Impact if not run:** 8 + 8 = 16 active milestones permanently NULL
-  on `amount_lovelace`/`time_limit`/`paused`. Production deployments
-  that ran continuously while bug #4 was active are likely also
-  affected; check
-  `SELECT project_id FROM treasury.projects WHERE datum_parse_error LIKE 'top-level datum has 0 fields%'`.
+#### KI-VND-05 — Datum corruption from prior bug #4 *(RESOLVED — cold resync + bug #6 fix)*
+- **Was:** `UTXO-EC-0002-25-03` (fund tx `b39d013c…`) and
+  `EC-0013(1,2,7)-25` (fund tx `5bc5a75e…`) had their captured datums
+  overwritten with `d87980` (6 bytes) before bug #4 was fixed.
+- **Resolution path:** the cold resync from
+  `STORE_CARDANO_SYNC_START_SLOT` (with the trigger armed before
+  yaci_store ingestion) captured the original kilobyte-scale datums
+  into `treasury.utxo_history`. The merged-source query (bug #6 fix in
+  `get_script_utxo_for_tx`) ensures the captured datum wins over the
+  surviving 3-byte yaci_store reference output.
+- **Verified:** `b39d013c…` output 0 = 1320 bytes, `5bc5a75e…` output 0
+  = 1414 bytes; both parse to 20 + 23 milestones with no errors.
+  `vendor_payment_key_hash` and `datum_parse_error` columns now
+  populated/clear on these projects.
+- **Operator note:** if a production deployment ran continuously while
+  bugs #3 and #4 were active, it may have similarly corrupted datums.
+  Check with `SELECT project_id FROM treasury.projects WHERE
+  datum_parse_error IS NOT NULL`. Recovery is the same wipe-and-resync.
 
 #### KI-MOD-01 — `modify` events create milestones with NULL datum fields *(OPEN — small follow-up)*
 - **Pattern:** when a `modify` event archives a milestone and creates a
@@ -338,22 +356,23 @@ FROM treasury.milestones;
 - Treasury-level events (publish, initialize, disburse) have NULL
   `project_db_id` by design — they aren't tied to a project.
 
-#### KI-EVT-01-residual — 4 events still NULL, blocked on KI-VND-05 corruption *(OPEN — backfills on cold resync)*
-- The 4 events are descendants of the 2 KI-VND-05 corrupted projects.
-  Their seed UTXOs in `treasury.utxo_history` have `project_db_id IS
-  NULL` because `process_fund` skipped seed propagation for those
-  projects when bug #4 corrupted the captured datum.
-- **Tx hashes:**
-  - `76ea3cc35a57…` (withdraw, slot 172714231)
-  - `6db20bb408c4…` (complete, slot 176999799)
-  - `b4d7a78ec2c8…` (complete, slot 177000042)
-  - `d3b6f4451d5c…` (withdraw, slot 185140469)
-- **Recovery:** runs automatically once KI-VND-05's cold resync clears
-  the corrupted utxo_history rows. The next `sync_all_events` re-runs
-  `process_fund` on the original captured datums, seeds
-  `project_db_id` on the fund outputs, and `find_project_from_inputs`
-  (`event_processor.rs:1093`) backfills these 4 events via
-  `ON CONFLICT DO UPDATE`.
+#### KI-EVT-01-residual — 12 events still NULL after cold resync *(OPEN — likely tied to KI-MOD-01)*
+- After cold resync: 11 complete + 1 withdraw events have NULL
+  `project_db_id`. All cluster around slots 170M–173M, on
+  KI-MOD-01-affected projects where modify events introduced milestones
+  with non-original IDs (MS-N gaps).
+- **Hypothesis:** `find_project_from_inputs`
+  (`event_processor.rs:1093`) uses `collect_milestone_id_hints` to
+  disambiguate when chain trace finds multiple candidate projects (see
+  KI-OC-03). When the event's milestone IDs (e.g., `MS-15`) appear in
+  modify-created milestone rows on more than one project, the hint
+  scoring is ambiguous and trace returns `None`.
+- **Status:** investigation pending. Slight regression from the 4 NULLs
+  seen pre-cold-resync; the wipe also wiped any partially-seeded chain
+  state. Resolution probably involves tightening
+  `collect_milestone_id_hints` to use both milestone_id AND
+  milestone_order, or falling back to the input UTXO's
+  `project_db_id` directly when ambiguous.
 
 **Repro query**
 
@@ -669,16 +688,16 @@ of `/api/v1/status`, but worth a one-line release note.
 
 | ID | Area | Status | Blocked on |
 |---|---|---|---|
-| KI-VND-01 | NULL `vendor_payment_key_hash` on `UTXO-*` projects | **resolved** (5-bug cascade, 10/42 → 1/42) | — |
+| KI-VND-01 | NULL `vendor_payment_key_hash` on `UTXO-*` projects | **resolved** (6-bug cascade, 10/42 → 0/42 post cold resync) | — |
 | KI-VND-02 | `vendor_name` deprecated | **resolved** (column dropped) | — |
 | KI-VND-03 | `contract_url` deprecated | **resolved** (column dropped) | — |
 | KI-VND-04 | `contract_address` NULL on cold replay | **resolved** (verified, 0/42) | — |
-| KI-VND-05 | 2 corrupted utxo_history datums from prior bug #4 | **open** — requires cold resync to recover | — |
+| KI-VND-05 | 2 corrupted utxo_history datums from prior bug #4 | **resolved** (cold resync + bug #6 merged-source query) | — |
 | KI-MIL-01 (`label`) | NULL `label` for `UTXO-*` | **resolved** (description fallback, 0/364) | — |
-| KI-MIL-01 (`amount`/`time_limit`) | NULL datum-derived fields for `UTXO-*` | **largely resolved** (136/386 → 16/364) | KI-VND-05, KI-MOD-01 |
+| KI-MIL-01 (`amount`/`time_limit`) | NULL datum-derived fields for `UTXO-*` | **largely resolved** (136/386 → 16/364) | KI-MOD-01 |
 | KI-MIL-01 (`acceptance_criteria`) | NULL for `UTXO-*` | **not a bug** — metadata genuinely lacks the field | — |
-| KI-EVT-01 | NULL `project_db_id` on chain-trace failure | **resolved** (verified, 4/413 residual upstream) | — |
-| KI-EVT-01-residual | 4 events still NULL on KI-VND-05 descendants | **open** — backfills on cold resync | KI-VND-05 |
+| KI-EVT-01 | NULL `project_db_id` on chain-trace failure | **resolved** (verified, 12/413 residual upstream) | — |
+| KI-EVT-01-residual | 12 events still NULL on KI-MOD-01-affected projects | **open** — likely milestone-id-hint disambiguation issue | KI-MOD-01 |
 | KI-MOD-01 | `modify` events create milestones with NULL datum fields | **open** — small follow-up fix | — |
 | KI-EVT-03 | NULL `milestone_id` on treasury-level events | by design | — |
 | KI-UTX-01 | historical-UTXO table + trigger | **implemented & verified** | — |

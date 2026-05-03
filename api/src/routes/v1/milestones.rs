@@ -154,6 +154,10 @@ pub async fn list_milestones(
             m.archived_by_tx_hash,
             m.archived_at,
             m.superseded_by,
+            (SELECT tx_hash FROM treasury.events WHERE milestone_id = m.id AND event_type = 'pause' ORDER BY block_time DESC LIMIT 1) AS last_pause_tx_hash,
+            (SELECT block_time FROM treasury.events WHERE milestone_id = m.id AND event_type = 'pause' ORDER BY block_time DESC LIMIT 1) AS last_pause_time,
+            (SELECT tx_hash FROM treasury.events WHERE milestone_id = m.id AND event_type = 'resume' ORDER BY block_time DESC LIMIT 1) AS last_resume_tx_hash,
+            (SELECT block_time FROM treasury.events WHERE milestone_id = m.id AND event_type = 'resume' ORDER BY block_time DESC LIMIT 1) AS last_resume_time,
             vc.project_id,
             vc.project_name
         FROM treasury.milestones m
@@ -243,6 +247,10 @@ pub async fn get_milestone(
             m.archived_by_tx_hash,
             m.archived_at,
             m.superseded_by,
+            (SELECT tx_hash FROM treasury.events WHERE milestone_id = m.id AND event_type = 'pause' ORDER BY block_time DESC LIMIT 1) AS last_pause_tx_hash,
+            (SELECT block_time FROM treasury.events WHERE milestone_id = m.id AND event_type = 'pause' ORDER BY block_time DESC LIMIT 1) AS last_pause_time,
+            (SELECT tx_hash FROM treasury.events WHERE milestone_id = m.id AND event_type = 'resume' ORDER BY block_time DESC LIMIT 1) AS last_resume_tx_hash,
+            (SELECT block_time FROM treasury.events WHERE milestone_id = m.id AND event_type = 'resume' ORDER BY block_time DESC LIMIT 1) AS last_resume_time,
             vc.project_id,
             vc.project_name
         FROM treasury.milestones m
@@ -321,6 +329,10 @@ pub async fn list_milestones_by_project(
             m.complete_tx_hash, m.complete_time, m.complete_description, m.evidence,
             m.withdraw_tx_hash, m.withdraw_time, m.withdraw_amount,
             m.archived_by_tx_hash, m.archived_at, m.superseded_by,
+            (SELECT tx_hash FROM treasury.events WHERE milestone_id = m.id AND event_type = 'pause' ORDER BY block_time DESC LIMIT 1) AS last_pause_tx_hash,
+            (SELECT block_time FROM treasury.events WHERE milestone_id = m.id AND event_type = 'pause' ORDER BY block_time DESC LIMIT 1) AS last_pause_time,
+            (SELECT tx_hash FROM treasury.events WHERE milestone_id = m.id AND event_type = 'resume' ORDER BY block_time DESC LIMIT 1) AS last_resume_tx_hash,
+            (SELECT block_time FROM treasury.events WHERE milestone_id = m.id AND event_type = 'resume' ORDER BY block_time DESC LIMIT 1) AS last_resume_time,
             p.project_id, p.project_name
         FROM treasury.milestones m
         JOIN treasury.projects p ON p.id = m.project_db_id

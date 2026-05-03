@@ -839,11 +839,17 @@ impl EventProcessor {
             }
         };
 
-        if let Some(vc_id) = project_db_id {
+        let matched_milestone_id = if let Some(vc_id) = project_db_id {
             // Also update per-milestone pause flags from output datum if available
             self.update_milestone_pause_from_datum(&event.tx_hash, vc_id).await?;
+            // Resolve the affected milestone(s) from body.milestones keys
+            self.resolve_first_milestone_from_body(event_body, vc_id).await?
+        } else {
+            None
+        };
 
-            self.insert_event_full(event, "pause", None, Some(vc_id), None, None, &reason, &None, body).await?;
+        if let Some(vc_id) = project_db_id {
+            self.insert_event_full(event, "pause", None, Some(vc_id), matched_milestone_id, None, &reason, &None, body).await?;
         } else {
             tracing::warn!("Could not find vendor contract for pause event {}", event.tx_hash);
             self.insert_event_full(event, "pause", None, None, None, None, &reason, &None, body).await?;
@@ -880,11 +886,16 @@ impl EventProcessor {
             }
         };
 
-        if let Some(vc_id) = project_db_id {
+        let matched_milestone_id = if let Some(vc_id) = project_db_id {
             // Also update per-milestone pause flags from output datum if available
             self.update_milestone_pause_from_datum(&event.tx_hash, vc_id).await?;
+            self.resolve_first_milestone_from_body(event_body, vc_id).await?
+        } else {
+            None
+        };
 
-            self.insert_event_full(event, "resume", None, Some(vc_id), None, None, &None, &None, body).await?;
+        if let Some(vc_id) = project_db_id {
+            self.insert_event_full(event, "resume", None, Some(vc_id), matched_milestone_id, None, &None, &None, body).await?;
         } else {
             tracing::warn!("Could not find vendor contract for resume event {}", event.tx_hash);
             self.insert_event_full(event, "resume", None, None, None, None, &None, &None, body).await?;
@@ -1115,6 +1126,9 @@ impl EventProcessor {
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (tx_hash) DO UPDATE SET
+                treasury_id = COALESCE(EXCLUDED.treasury_id, treasury.events.treasury_id),
+                project_db_id = COALESCE(EXCLUDED.project_db_id, treasury.events.project_db_id),
+                milestone_id = COALESCE(EXCLUDED.milestone_id, treasury.events.milestone_id),
                 amount_lovelace = COALESCE(EXCLUDED.amount_lovelace, treasury.events.amount_lovelace),
                 reason = COALESCE(EXCLUDED.reason, treasury.events.reason),
                 destination = COALESCE(EXCLUDED.destination, treasury.events.destination)
@@ -1357,38 +1371,31 @@ impl EventProcessor {
     }
 
     /// Fetch script UTXO data (address, lovelace_amount, inline_datum) for a transaction.
-    /// Tries yaci_store.address_utxo first, falls back to pre-fetched treasury.utxo_history.
     ///
-    /// Ordering: prefer the addr1x output with the LARGEST inline_datum. Fund txs
-    /// can produce multiple script outputs — typically a vendor-contract output
-    /// carrying the project datum (kilobytes) plus a treasury-contract change
-    /// output carrying a trivial `Constr(0, [])` datum (3 bytes). Picking the
-    /// larger datum reliably selects the vendor contract output without needing
-    /// to know its address up front.
+    /// Picks the addr1x output with the LARGEST inline_datum across BOTH
+    /// `yaci_store.address_utxo` AND `treasury.utxo_history`. Fund txs
+    /// often produce two script outputs — a vendor-contract output carrying
+    /// the kilobyte project datum, plus a treasury-contract reference
+    /// output carrying a trivial `Constr(0, [])` datum (3 bytes). yaci_store
+    /// prunes spent UTXOs (~2160 blocks) so the spent vendor-contract
+    /// output may only survive in `treasury.utxo_history` (captured by the
+    /// trigger before pruning); the unspent treasury-reference output stays
+    /// in yaci_store. Querying yaci_store alone returns the trivial datum
+    /// for these txs; merging across both reliably surfaces the real
+    /// project datum.
     async fn get_script_utxo_for_tx(&self, tx_hash: &str) -> anyhow::Result<(Option<String>, Option<i64>, Option<String>)> {
-        let result: Option<(String, Option<i64>, Option<String>)> = sqlx::query_as(
-            r#"
-            SELECT owner_addr, lovelace_amount, inline_datum
-            FROM yaci_store.address_utxo
-            WHERE tx_hash = $1 AND owner_addr LIKE 'addr1x%'
-            ORDER BY length(COALESCE(inline_datum, '')) DESC
-            LIMIT 1
-            "#
-        )
-        .bind(tx_hash)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        if let Some((addr, amt, datum)) = result {
-            return Ok((Some(addr), amt, datum));
-        }
-
-        // Fallback to pre-fetched treasury.utxo_history
         let result: Option<(Option<String>, Option<i64>, Option<String>)> = sqlx::query_as(
             r#"
             SELECT address, lovelace_amount, inline_datum_cbor
-            FROM treasury.utxo_history
-            WHERE tx_hash = $1 AND address LIKE 'addr1x%'
+            FROM (
+                SELECT owner_addr AS address, lovelace_amount, inline_datum AS inline_datum_cbor
+                FROM yaci_store.address_utxo
+                WHERE tx_hash = $1 AND owner_addr LIKE 'addr1x%'
+                UNION ALL
+                SELECT address, lovelace_amount, inline_datum_cbor
+                FROM treasury.utxo_history
+                WHERE tx_hash = $1 AND address LIKE 'addr1x%'
+            ) merged
             ORDER BY length(COALESCE(inline_datum_cbor, '')) DESC
             LIMIT 1
             "#
@@ -1397,14 +1404,7 @@ impl EventProcessor {
         .fetch_optional(&self.pool)
         .await?;
 
-        if let Some((addr, amt, datum)) = result {
-            if addr.is_some() {
-                tracing::debug!("Used treasury.utxo_history fallback for tx {} (yaci_store UTXO pruned)", tx_hash);
-            }
-            return Ok((addr, amt, datum));
-        }
-
-        Ok((None, None, None))
+        Ok(result.unwrap_or((None, None, None)))
     }
 
     /// Look up a specific UTXO by tx_hash + output_index.
@@ -1512,6 +1512,47 @@ impl EventProcessor {
         }
 
         Ok(())
+    }
+
+    /// Resolve the first milestone referenced in an event's `body.milestones`
+    /// keys (or `body.milestone` string) to a `treasury.milestones.id` for the
+    /// given project. Used by pause/resume to populate `events.milestone_id`
+    /// so consumers don't have to re-parse the metadata to know which
+    /// milestone the event affects.
+    async fn resolve_first_milestone_from_body(
+        &self,
+        event_body: &Value,
+        project_db_id: i32,
+    ) -> anyhow::Result<Option<i32>> {
+        let candidates: Vec<String> = if let Some(obj) = event_body.get("milestones").and_then(|m| m.as_object()) {
+            obj.keys().cloned().collect()
+        } else if let Some(s) = event_body.get("milestone").and_then(|m| m.as_str()) {
+            vec![s.to_string()]
+        } else {
+            return Ok(None);
+        };
+
+        for key in candidates {
+            let order_hint = canonical_milestone_order(&key);
+            let id: Option<i32> = sqlx::query_scalar(
+                r#"
+                SELECT id FROM treasury.milestones
+                WHERE project_db_id = $1
+                  AND NOT archived
+                  AND (milestone_id = $2 OR milestone_order = $3)
+                LIMIT 1
+                "#,
+            )
+            .bind(project_db_id)
+            .bind(&key)
+            .bind(order_hint)
+            .fetch_optional(&self.pool)
+            .await?;
+            if id.is_some() {
+                return Ok(id);
+            }
+        }
+        Ok(None)
     }
 }
 

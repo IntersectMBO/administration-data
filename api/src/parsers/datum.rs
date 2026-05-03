@@ -383,6 +383,19 @@ mod tests {
     }
 
     #[test]
+    fn test_utxo_ec_0002_25_03_fixture_parses() {
+        // Real on-chain datum from project UTXO-EC-0002-25-03 (20 milestones).
+        // This datum was historically corrupted by a prior bug; ensures the
+        // post-fix parser still handles it correctly.
+        let hex = include_str!("../../tests/fixtures/utxo_ec_0002_25_03.hex").trim();
+        let r = parse_project_datum(hex);
+        assert!(r.top_level_error.is_none(), "top-level error: {:?}", r.top_level_error);
+        assert!(r.vendor_payment_key_hash.is_some());
+        assert_eq!(r.milestones.len(), 20);
+        assert!(r.milestones.iter().all(|m| m.is_ok()));
+    }
+
+    #[test]
     fn test_partial_parse_keeps_vendor_info_when_milestones_fail() {
         // Hand-crafted datum: valid vendor info, milestones array contains a
         // bogus milestone (tag 199 instead of 121). The partial parser should

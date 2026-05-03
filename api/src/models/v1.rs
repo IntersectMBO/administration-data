@@ -584,7 +584,7 @@ pub struct MilestoneResponse {
     pub withdrawn: bool,
     /// Whether completion evidence has been provided
     pub evidence_provided: bool,
-    /// Whether this milestone is paused
+    /// Whether this milestone is currently paused (latest pause/resume state)
     pub paused: bool,
     /// Whether this milestone has been archived (replaced by a modify event)
     pub archived: bool,
@@ -594,8 +594,31 @@ pub struct MilestoneResponse {
     pub withdrawal: Option<MilestoneWithdrawal>,
     /// Archive info (present when archived)
     pub archive_info: Option<MilestoneArchiveInfo>,
+    /// Pause/resume history (present when at least one pause event has been recorded)
+    pub pause_history: Option<MilestonePauseHistory>,
     /// Project reference
     pub project: ProjectReference,
+}
+
+/// Pause/resume history for a milestone.
+///
+/// Present when at least one pause OR resume event has been recorded for the
+/// milestone. `currently_paused` reflects the milestone's current state (set
+/// by the contract output datum). Either `last_pause_*` or `last_resume_*`
+/// may be null if that side hasn't happened yet (e.g., a milestone that was
+/// resumed but whose original pause predates our indexing).
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct MilestonePauseHistory {
+    /// Whether the milestone is currently paused (mirrors the top-level `paused`)
+    pub currently_paused: bool,
+    /// Most recent pause transaction
+    pub last_pause_tx_hash: Option<String>,
+    /// On-chain time of the last pause (`{unix, iso}`)
+    pub last_pause_time: Option<ChainTime>,
+    /// Most recent resume transaction
+    pub last_resume_tx_hash: Option<String>,
+    /// On-chain time of the last resume (`{unix, iso}`)
+    pub last_resume_time: Option<ChainTime>,
 }
 
 /// Milestone completion details
@@ -669,6 +692,10 @@ pub struct MilestoneRow {
     pub archived_by_tx_hash: Option<String>,
     pub archived_at: Option<i64>,
     pub superseded_by: Option<i32>,
+    pub last_pause_tx_hash: Option<String>,
+    pub last_pause_time: Option<i64>,
+    pub last_resume_tx_hash: Option<String>,
+    pub last_resume_time: Option<i64>,
     pub project_id: String,
     pub project_name: Option<String>,
 }
@@ -698,6 +725,18 @@ impl From<MilestoneRow> for MilestoneResponse {
             None
         };
 
+        let pause_history = if row.last_pause_tx_hash.is_some() || row.last_resume_tx_hash.is_some() {
+            Some(MilestonePauseHistory {
+                currently_paused: row.paused,
+                last_pause_tx_hash: row.last_pause_tx_hash.clone(),
+                last_pause_time: ChainTime::maybe_from_secs(row.last_pause_time),
+                last_resume_tx_hash: row.last_resume_tx_hash.clone(),
+                last_resume_time: ChainTime::maybe_from_secs(row.last_resume_time),
+            })
+        } else {
+            None
+        };
+
         Self {
             id: row.id,
             milestone_id: row.milestone_id,
@@ -714,6 +753,7 @@ impl From<MilestoneRow> for MilestoneResponse {
             completion,
             withdrawal,
             archive_info,
+            pause_history,
             project: ProjectReference {
                 project_id: row.project_id,
                 project_name: row.project_name,
