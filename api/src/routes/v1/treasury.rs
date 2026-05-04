@@ -76,8 +76,19 @@ pub async fn get_treasury_utxos(
         .0
         .ok_or_else(|| ApiError::NotFound("treasury contract_address not yet known".into()))?;
 
+    // Source of truth for "currently unspent" is yaci_store.address_utxo (rows are
+    // deleted on prune). Anti-join against tx_input handles the pruning-window lag
+    // window. We do NOT trust treasury.utxo_history.spent — pre-trigger captures
+    // and KI-UTX-02 non-script captures leave stale spent=FALSE rows.
     let (total_count,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM treasury.utxo_history WHERE address = $1 AND NOT spent",
+        r#"
+        SELECT COUNT(*) FROM yaci_store.address_utxo au
+        WHERE au.owner_addr = $1
+          AND NOT EXISTS (
+              SELECT 1 FROM yaci_store.tx_input ti
+              WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+          )
+        "#,
     )
     .bind(&address)
     .fetch_one(&pool)
@@ -86,16 +97,20 @@ pub async fn get_treasury_utxos(
     let rows = sqlx::query_as::<_, UtxoRow>(
         r#"
         SELECT
-            tx_hash,
-            output_index,
-            address,
-            address_type,
-            lovelace_amount,
-            slot,
-            block_number
-        FROM treasury.utxo_history
-        WHERE address = $1 AND NOT spent
-        ORDER BY slot DESC
+            au.tx_hash,
+            au.output_index,
+            au.owner_addr AS address,
+            'treasury'::TEXT AS address_type,
+            au.lovelace_amount,
+            au.slot,
+            au.block AS block_number
+        FROM yaci_store.address_utxo au
+        WHERE au.owner_addr = $1
+          AND NOT EXISTS (
+              SELECT 1 FROM yaci_store.tx_input ti
+              WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+          )
+        ORDER BY au.slot DESC
         LIMIT $2 OFFSET $3
         "#,
     )

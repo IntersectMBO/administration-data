@@ -251,7 +251,19 @@ SELECT
     vc.fund_slot,
     vc.fund_block_time,
     vc.initial_amount_lovelace,
-    vc.status,
+    -- Raw on-chain status as written by event handlers (active/paused/cancelled).
+    -- TOM has no "complete project" event, so this column never holds 'completed'.
+    vc.status as raw_status,
+    -- Derived status: 'completed' once every non-archived milestone has been
+    -- withdrawn. 'cancelled' wins; otherwise paused/active mirror raw_status.
+    CASE
+        WHEN vc.status = 'cancelled' THEN 'cancelled'
+        WHEN COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived) > 0
+             AND COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived AND NOT m.withdrawn) = 0
+            THEN 'completed'
+        WHEN vc.status = 'paused' THEN 'paused'
+        ELSE COALESCE(vc.status, 'active')
+    END AS status,
     vc.created_at,
     vc.updated_at,
     -- Treasury context
@@ -264,9 +276,31 @@ SELECT
     COUNT(DISTINCT m.id) FILTER (WHERE NOT m.archived AND m.paused AND NOT m.withdrawn) as paused_milestones,
     -- Financial totals from milestones
     COALESCE(SUM(DISTINCT m.withdraw_amount) FILTER (WHERE NOT m.archived), 0)::BIGINT as total_withdrawn_lovelace,
-    -- Current balance from UTXOs (only script address UTXOs)
-    COALESCE(SUM(u.lovelace_amount) FILTER (WHERE NOT u.spent AND u.address LIKE 'addr1x%'), 0)::BIGINT as current_balance_lovelace,
-    COUNT(u.id) FILTER (WHERE NOT u.spent AND u.address LIKE 'addr1x%') as utxo_count,
+    -- Current balance: live unspent UTXOs from yaci_store.address_utxo (authoritative
+    -- because pruning removes spent rows), restricted to UTXOs that utxo_history has
+    -- linked to this project. Avoids ghost-unspent rows in utxo_history.spent.
+    COALESCE((
+        SELECT SUM(au.lovelace_amount)
+        FROM yaci_store.address_utxo au
+        JOIN treasury.utxo_history uh
+            ON uh.tx_hash = au.tx_hash AND uh.output_index = au.output_index
+        WHERE uh.project_db_id = vc.id
+          AND NOT EXISTS (
+              SELECT 1 FROM yaci_store.tx_input ti
+              WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+          )
+    ), 0)::BIGINT as current_balance_lovelace,
+    COALESCE((
+        SELECT COUNT(*)
+        FROM yaci_store.address_utxo au
+        JOIN treasury.utxo_history uh
+            ON uh.tx_hash = au.tx_hash AND uh.output_index = au.output_index
+        WHERE uh.project_db_id = vc.id
+          AND NOT EXISTS (
+              SELECT 1 FROM yaci_store.tx_input ti
+              WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+          )
+    ), 0) as utxo_count,
     -- Last event time
     (SELECT MAX(e.block_time) FROM treasury.events e WHERE e.project_db_id = vc.id) as last_event_time,
     -- Event count
@@ -274,7 +308,6 @@ SELECT
 FROM treasury.projects vc
 LEFT JOIN treasury.treasury_contracts tc ON tc.id = vc.treasury_id
 LEFT JOIN treasury.milestones m ON m.project_db_id = vc.id
-LEFT JOIN treasury.utxo_history u ON u.project_db_id = vc.id
 GROUP BY vc.id, tc.contract_instance;
 
 -- Milestone timeline with vendor context
@@ -347,18 +380,30 @@ SELECT
     tc.initialized_at,
     tc.permissions,
     COUNT(DISTINCT vc.id) as project_count,
-    COUNT(DISTINCT vc.id) FILTER (WHERE vc.status = 'active') as active_contracts,
-    COUNT(DISTINCT vc.id) FILTER (WHERE vc.status = 'completed') as completed_contracts,
-    COUNT(DISTINCT vc.id) FILTER (WHERE vc.status = 'cancelled') as cancelled_contracts,
+    COUNT(DISTINCT vc.id) FILTER (WHERE vps.status = 'active') as active_contracts,
+    COUNT(DISTINCT vc.id) FILTER (WHERE vps.status = 'completed') as completed_contracts,
+    COUNT(DISTINCT vc.id) FILTER (WHERE vps.status = 'cancelled') as cancelled_contracts,
+    COUNT(DISTINCT vc.id) FILTER (WHERE vps.status = 'paused') as paused_contracts,
+    -- Live treasury balance from yaci's UTXO set (authoritative; spent rows are
+    -- pruned out). utxo_history.spent flag is unreliable for historical/pre-trigger
+    -- captures so we don't trust it for current totals.
     COALESCE((
-        SELECT SUM(u.lovelace_amount)
-        FROM treasury.utxo_history u
-        WHERE u.address = tc.contract_address AND NOT u.spent
+        SELECT SUM(au.lovelace_amount)
+        FROM yaci_store.address_utxo au
+        WHERE au.owner_addr = tc.contract_address
+          AND NOT EXISTS (
+              SELECT 1 FROM yaci_store.tx_input ti
+              WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+          )
     ), 0)::BIGINT as treasury_balance,
     COALESCE((
         SELECT COUNT(*)
-        FROM treasury.utxo_history u
-        WHERE u.address = tc.contract_address AND NOT u.spent
+        FROM yaci_store.address_utxo au
+        WHERE au.owner_addr = tc.contract_address
+          AND NOT EXISTS (
+              SELECT 1 FROM yaci_store.tx_input ti
+              WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+          )
     ), 0) as utxo_count,
     (SELECT COUNT(*) FROM treasury.events WHERE treasury_id = tc.id) as total_events,
     (SELECT MAX(block_time) FROM treasury.events WHERE treasury_id = tc.id) as last_event_time,
@@ -366,6 +411,7 @@ SELECT
     tc.updated_at
 FROM treasury.treasury_contracts tc
 LEFT JOIN treasury.projects vc ON vc.treasury_id = tc.id
+LEFT JOIN treasury.v_projects_summary vps ON vps.id = vc.id
 GROUP BY tc.id;
 
 -- Events with full context (treasury, project, milestone info)
@@ -408,18 +454,30 @@ SELECT
     COALESCE(SUM(m_totals.total_withdrawn), 0)::BIGINT as total_withdrawn_lovelace,
     -- Remaining (allocated - withdrawn)
     (COALESCE(SUM(vc.initial_amount_lovelace), 0) - COALESCE(SUM(m_totals.total_withdrawn), 0))::BIGINT as total_remaining_lovelace,
-    -- Treasury balance (unspent UTXOs at treasury address)
+    -- Treasury reserve balance: live unspent at TRSC address from yaci's UTXO set.
+    -- Anti-join against tx_input handles pruning-window lag (rows not yet pruned
+    -- but already spent are excluded).
     COALESCE((
-        SELECT SUM(u.lovelace_amount)
-        FROM treasury.utxo_history u
-        WHERE u.address = tc.contract_address AND NOT u.spent
+        SELECT SUM(au.lovelace_amount)
+        FROM yaci_store.address_utxo au
+        WHERE au.owner_addr = tc.contract_address
+          AND NOT EXISTS (
+              SELECT 1 FROM yaci_store.tx_input ti
+              WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+          )
     ), 0)::BIGINT as treasury_balance_lovelace,
-    -- Project-level balance (sum of project UTXOs)
+    -- PSSC (vendor contract) balance: raw live unspent at the singleton PSSC address.
+    -- This is the on-chain truth for "funds currently held by the vendor contract".
+    -- Per-project attribution lives in v_projects_summary.current_balance_lovelace
+    -- and may sum to less than this when chain-trace gaps leave unattributed UTXOs.
     COALESCE((
-        SELECT SUM(u2.lovelace_amount)
-        FROM treasury.utxo_history u2
-        JOIN treasury.projects vc2 ON vc2.id = u2.project_db_id
-        WHERE vc2.treasury_id = tc.id AND NOT u2.spent AND u2.address LIKE 'addr1x%'
+        SELECT SUM(au.lovelace_amount)
+        FROM yaci_store.address_utxo au
+        JOIN treasury.vendor_contracts vco ON vco.address = au.owner_addr
+        WHERE NOT EXISTS (
+            SELECT 1 FROM yaci_store.tx_input ti
+            WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+        )
     ), 0)::BIGINT as project_balance_lovelace,
     -- Counts
     COUNT(DISTINCT vc.id) as project_count,

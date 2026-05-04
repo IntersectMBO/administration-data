@@ -44,8 +44,11 @@
 > `treasury.utxo_history`.
 >
 > **Still open:** KI-OC-02 (on-chain limitation, can't fix), KI-MOD-01
-> (modify-event milestones don't pick up datum updates), small KI-EVT-01
-> regression on KI-MOD-01-affected projects (12 NULL events).
+> (modify events don't reflect updated milestone amounts / time limits in
+> the API — new milestone rows ship with NULL datum-derived fields), small
+> KI-EVT-01 regression on KI-MOD-01-affected projects (12 NULL events),
+> KI-FIN-04 (per-project balance under-counts the raw PSSC total when
+> chain trace can't attribute every UTXO).
 
 ## How to use this doc
 
@@ -230,24 +233,33 @@ GROUP BY p.project_id ORDER BY 2 DESC;
   Check with `SELECT project_id FROM treasury.projects WHERE
   datum_parse_error IS NOT NULL`. Recovery is the same wipe-and-resync.
 
-#### KI-MOD-01 — `modify` events create milestones with NULL datum fields *(OPEN — small follow-up)*
-- **Pattern:** when a `modify` event archives a milestone and creates a
-  replacement (often with a new `MS-N` ID), the new row's
-  `amount_lovelace` / `time_limit` / `paused` come out NULL because
-  `process_modify` doesn't re-parse the modify-tx's output datum to
-  populate them.
+#### KI-MOD-01 — `modify` events don't update milestone amounts or time limits *(OPEN — TODO)*
+- **User-visible symptom:** when an oversight committee submits a `modify`
+  event to change a milestone's payout amount or time limit, the API
+  continues to surface stale or NULL values for those fields. The on-chain
+  contract reflects the new state, but `/api/v1/projects/{id}/milestones`
+  doesn't.
+- **Pattern:** `process_modify` (`api/src/services/event_processor.rs`)
+  archives the existing milestone rows and inserts new ones, then COALESCE-
+  updates project naming fields from metadata. It does **not** re-parse the
+  modify-tx's output datum, so the new milestone rows' `amount_lovelace` /
+  `time_limit` / `paused` fields come out NULL — even when the on-chain
+  datum carries the updated values.
 - **Currently affected:** 8 active milestones in `UTXO-EC-0002-25-04`
   (IDs MS-5, MS-6, MS-8, MS-9, MS-12, MS-13, MS-17, MS-18 — all created
-  by modify events; gaps imply earlier IDs were modified out).
+  by modify events; gaps imply earlier IDs were modified out). The same
+  cluster also drives the KI-EVT-01-residual NULL `project_db_id` events.
 - **Why this is separate from KI-VND-01:** the fund datum *did* parse
-  successfully for this project; the issue is exclusively in
+  successfully for these projects; the issue is exclusively in
   `process_modify` which doesn't run the datum-update path that
   `process_fund` does.
-- **Proposed fix (small):** at the end of `process_modify`, look up the
-  modify tx's output datum via the same mechanism `process_fund` uses
-  (`get_script_utxo_for_tx` + `parse_project_datum`) and run the
-  milestone-update loop. Matching by `milestone_order` should align —
-  the modified contract's datum reflects current state.
+- **Proposed fix (small, deferred):** at the end of `process_modify`, look
+  up the modify tx's output datum via the same mechanism `process_fund`
+  uses (`get_script_utxo_for_tx` + `parse_project_datum`) and run the
+  milestone-update loop. Matching by `milestone_order` should align — the
+  modified contract's datum reflects current state. Re-running
+  `sync_all_events` after the fix lands will backfill via the idempotent
+  `ON CONFLICT DO UPDATE` chain; no resync needed.
 
 #### KI-VND-02 — `vendor_name` (deprecated) *(RESOLVED)*
 - Column dropped from `treasury.vendor_contracts`, models, routes and views.
@@ -395,6 +407,41 @@ GROUP BY 1 ORDER BY 1;
 ```sql
 SELECT event_type, COUNT(*) FILTER (WHERE milestone_id IS NULL) AS null_milestone
 FROM treasury.events GROUP BY 1 ORDER BY 1;
+```
+
+#### KI-FIN-04 — per-project balance under-counts the raw PSSC total *(OPEN — TODO)*
+- **Pattern:** `v_projects_summary.current_balance_lovelace` joins live
+  `yaci_store.address_utxo` against `treasury.utxo_history` so that each
+  unspent PSSC UTXO is attributed to the specific project that funded it.
+  Unspent PSSC UTXOs that `utxo_history` has *not* attributed to a project
+  (chain-trace gaps — primarily KI-EVT-01-residual / KI-MOD-01-affected
+  projects whose modify-chain we didn't fully trace) are excluded from
+  every project's per-project balance.
+- **Currently affected:** sum of per-project balances ≈ 80.65M ADA vs the
+  raw on-chain PSSC total of 88.34M ADA — gap of ~7.7M ADA sits at the
+  shared PSSC address but isn't claimed by any project row.
+- **Why this is OK at the treasury level:** `v_financial_summary
+  .project_balance_lovelace` and `/api/v1/statistics.financials
+  .current_balance_lovelace` deliberately use the *raw* PSSC SUM (not the
+  attributed sum), so the treasury-level total reports the on-chain truth.
+  The under-count only surfaces if a consumer sums per-project balances.
+- **Proposed fix (deferred):** resolve the underlying chain-trace gaps via
+  KI-MOD-01 (modify-tx datum re-parse) and KI-EVT-01-residual
+  (`collect_milestone_id_hints` disambiguation tightening). Once chain
+  trace covers every PSSC UTXO, attributed sum should match raw PSSC sum.
+
+**Repro query**
+
+```sql
+SELECT
+  (SELECT SUM(au.lovelace_amount)
+     FROM yaci_store.address_utxo au
+     JOIN treasury.vendor_contracts vc ON vc.address = au.owner_addr
+     WHERE NOT EXISTS (SELECT 1 FROM yaci_store.tx_input ti
+                       WHERE ti.tx_hash=au.tx_hash AND ti.output_index=au.output_index))
+  / 1e6 AS raw_pssc_ada,
+  (SELECT SUM(current_balance_lovelace) FROM treasury.v_projects_summary)
+  / 1e6 AS attributed_pssc_ada;
 ```
 
 ---
@@ -698,7 +745,8 @@ of `/api/v1/status`, but worth a one-line release note.
 | KI-MIL-01 (`acceptance_criteria`) | NULL for `UTXO-*` | **not a bug** — metadata genuinely lacks the field | — |
 | KI-EVT-01 | NULL `project_db_id` on chain-trace failure | **resolved** (verified, 12/413 residual upstream) | — |
 | KI-EVT-01-residual | 12 events still NULL on KI-MOD-01-affected projects | **open** — likely milestone-id-hint disambiguation issue | KI-MOD-01 |
-| KI-MOD-01 | `modify` events create milestones with NULL datum fields | **open** — small follow-up fix | — |
+| KI-MOD-01 | `modify` events don't update milestone amounts / time limits in API | **open** — TODO | — |
+| KI-FIN-04 | per-project balance under-counts raw PSSC total (chain-trace gaps) | **open** — TODO | KI-MOD-01 |
 | KI-EVT-03 | NULL `milestone_id` on treasury-level events | by design | — |
 | KI-UTX-01 | historical-UTXO table + trigger | **implemented & verified** | — |
 | KI-UTX-02 | `project_db_id` NULL on non-script UTXOs | by design | — |

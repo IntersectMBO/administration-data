@@ -389,12 +389,21 @@ pub async fn get_project_utxos(
         )));
     }
 
+    // Source of truth for "currently unspent" is yaci_store.address_utxo (rows
+    // pruned on spend; anti-join against tx_input handles the pruning-window lag).
+    // utxo_history is used only for project attribution.
     let (total_count,): (i64,) = sqlx::query_as(
         r#"
         SELECT COUNT(*)
-        FROM treasury.utxo_history u
-        JOIN treasury.projects vc ON vc.id = u.project_db_id
-        WHERE vc.project_id = $1 AND NOT u.spent
+        FROM yaci_store.address_utxo au
+        JOIN treasury.utxo_history uh
+            ON uh.tx_hash = au.tx_hash AND uh.output_index = au.output_index
+        JOIN treasury.projects vc ON vc.id = uh.project_db_id
+        WHERE vc.project_id = $1
+          AND NOT EXISTS (
+              SELECT 1 FROM yaci_store.tx_input ti
+              WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+          )
         "#,
     )
     .bind(&project_id)
@@ -404,17 +413,23 @@ pub async fn get_project_utxos(
     let rows = sqlx::query_as::<_, UtxoRow>(
         r#"
         SELECT
-            u.tx_hash,
-            u.output_index,
-            u.address,
-            u.address_type,
-            u.lovelace_amount,
-            u.slot,
-            u.block_number
-        FROM treasury.utxo_history u
-        JOIN treasury.projects vc ON vc.id = u.project_db_id
-        WHERE vc.project_id = $1 AND NOT u.spent
-        ORDER BY u.slot DESC
+            au.tx_hash,
+            au.output_index,
+            au.owner_addr AS address,
+            uh.address_type,
+            au.lovelace_amount,
+            au.slot,
+            au.block AS block_number
+        FROM yaci_store.address_utxo au
+        JOIN treasury.utxo_history uh
+            ON uh.tx_hash = au.tx_hash AND uh.output_index = au.output_index
+        JOIN treasury.projects vc ON vc.id = uh.project_db_id
+        WHERE vc.project_id = $1
+          AND NOT EXISTS (
+              SELECT 1 FROM yaci_store.tx_input ti
+              WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+          )
+        ORDER BY au.slot DESC
         LIMIT $2 OFFSET $3
         "#,
     )

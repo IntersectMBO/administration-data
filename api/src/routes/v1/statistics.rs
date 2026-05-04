@@ -58,16 +58,32 @@ async fn get_vendor_contract_stats(pool: &PgPool) -> Result<VendorContractStats,
         .fetch_one(pool)
         .await?;
 
+    // utxo_history_count is the lifetime capture count (script-address only).
+    // unspent_utxo_count + current_balance_lovelace come from yaci's live UTXO set
+    // (authoritative — pruned spent rows can't leak in, ghost-unspent rows in
+    // utxo_history are excluded by the JOIN).
+    // utxo_history_count is the lifetime capture count (script-address only).
+    // unspent_utxo_count + current_balance_lovelace come from yaci's live UTXO set.
+    // yaci_store.address_utxo has no `spent` column — pruning removes rows. The
+    // anti-join against tx_input handles the pruning-window lag.
     let (utxo_history_count, unspent_utxo_count, current_balance_lovelace): (i64, i64, Option<i64>) =
         if let Some(ref addr) = address {
             sqlx::query_as(
                 r#"
                 SELECT
-                    COUNT(*)::BIGINT,
-                    COUNT(*) FILTER (WHERE NOT spent)::BIGINT,
-                    COALESCE(SUM(lovelace_amount) FILTER (WHERE NOT spent), 0)::BIGINT
-                FROM treasury.utxo_history
-                WHERE address = $1
+                    (SELECT COUNT(*) FROM treasury.utxo_history WHERE address = $1)::BIGINT,
+                    (SELECT COUNT(*) FROM yaci_store.address_utxo au
+                       WHERE au.owner_addr = $1
+                         AND NOT EXISTS (
+                             SELECT 1 FROM yaci_store.tx_input ti
+                             WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+                         ))::BIGINT,
+                    (SELECT COALESCE(SUM(au.lovelace_amount), 0) FROM yaci_store.address_utxo au
+                       WHERE au.owner_addr = $1
+                         AND NOT EXISTS (
+                             SELECT 1 FROM yaci_store.tx_input ti
+                             WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+                         ))::BIGINT
                 "#,
             )
             .bind(addr)
@@ -214,9 +230,36 @@ async fn get_financial_stats(pool: &PgPool) -> Result<FinancialStats, ApiError> 
     .await
     ?;
 
-    // Get current balance (unspent UTXOs)
+    // Current balance: raw live unspent at TRSC + PSSC addresses, from yaci's UTXO
+    // set (rows pruned on spend; anti-join against tx_input handles pruning lag).
+    // We do NOT trust treasury.utxo_history.spent — pre-trigger captures and
+    // KI-UTX-02 non-script captures leave stale spent=FALSE rows that would
+    // over-count. We do NOT join through utxo_history for project attribution
+    // either — chain-trace gaps would *under*-count the vendor contract balance.
     let (current_balance,): (Option<i64>,) = sqlx::query_as(
-        "SELECT COALESCE(SUM(lovelace_amount), 0)::BIGINT FROM treasury.utxo_history WHERE NOT spent"
+        r#"
+        SELECT (
+            COALESCE((
+                SELECT SUM(au.lovelace_amount)
+                FROM yaci_store.address_utxo au
+                JOIN treasury.treasury_contracts tc ON tc.contract_address = au.owner_addr
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM yaci_store.tx_input ti
+                    WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+                )
+            ), 0)
+            +
+            COALESCE((
+                SELECT SUM(au.lovelace_amount)
+                FROM yaci_store.address_utxo au
+                JOIN treasury.vendor_contracts vco ON vco.address = au.owner_addr
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM yaci_store.tx_input ti
+                    WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+                )
+            ), 0)
+        )::BIGINT
+        "#
     )
     .fetch_one(pool)
     .await
