@@ -129,13 +129,14 @@ Interactive documentation available at `/docs` (Swagger UI).
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/v1/vendor-contract` | Shared PSSC script address + project rollup by status |
+| `GET /api/v1/vendor-contract/utxos` | Currently-unspent UTxOs at the PSSC, labeled per project |
 
 ### Projects
 
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/v1/projects` | List all projects (with pagination, filtering, search) |
-| `GET /api/v1/projects/:project_id` | Get project details |
+| `GET /api/v1/projects/:project_id` | Get project details (includes inline `current_utxos`) |
 | `GET /api/v1/projects/:project_id/milestones` | Get project milestones |
 | `GET /api/v1/projects/:project_id/events` | Get project event history |
 | `GET /api/v1/projects/:project_id/utxos` | Get project UTXOs |

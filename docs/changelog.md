@@ -6,6 +6,36 @@ the equivalent merge). Pre-1.0 versions allowed breaking changes; the
 project is now operating under a 1.x line and breaking changes here are
 flagged as such.
 
+## v2.1.0 — 2026-05-05
+
+Adds a vendor-contract-wide UTxO view and inlines per-project UTxO refs on
+the project detail response. Both changes are additive — no breaking
+changes to existing endpoints or shapes.
+
+### Added
+
+- **`GET /api/v1/vendor-contract/utxos`** — paginated list of every
+  currently-unspent UTxO at the shared PSSC, each row labeled with its
+  owning project (`project_id`, `project_name`, `project_status`,
+  `project_db_id`). Lets clients enumerate live vendor-contract state in a
+  single call instead of fanning out across every project. Same
+  unspent-source-of-truth pattern as `/treasury/utxos` and
+  `/projects/:id/utxos` (`yaci_store.address_utxo` ⨯ anti-join on
+  `yaci_store.tx_input`).
+- **`ProjectDetail.current_utxos`** — `GET /api/v1/projects/{project_id}`
+  now includes a `current_utxos` array of `{ tx_hash, output_index,
+  lovelace_amount, slot }` so a single call gives the project's full live
+  state. Sum of `lovelace_amount` equals the existing
+  `financials.current_balance_lovelace`. `ProjectSummary` (the list
+  endpoint item shape) is unchanged.
+
+### Schema
+
+- No DB migration. Both features are read-only joins over existing
+  columns: `treasury.utxo_history.project_db_id` (already populated by
+  fund events + chain tracing) joined to `treasury.projects` and
+  `yaci_store.address_utxo`.
+
 ## v2.0.0 — 2026-05-01
 
 Semantic rename pass: split "vendor contract" into the *singleton on-chain

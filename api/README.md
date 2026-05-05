@@ -215,6 +215,51 @@ Get the shared vendor contract — the singleton on-chain script address every p
 
 ---
 
+#### `GET /api/v1/vendor-contract/utxos`
+
+List currently-unspent UTxOs at the shared vendor contract, each row labeled with its owning project. Lets you enumerate every live PSSC output in one call instead of fanning out across every project.
+
+"Currently unspent" is sourced from `yaci_store.address_utxo` with an anti-join against `yaci_store.tx_input` (same approach as `/projects/:id/utxos` and `/treasury/utxos`).
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `page` | integer | 1 | Page number (1-indexed) |
+| `limit` | integer | 50 | Results per page (max: 100) |
+
+**Example:**
+```bash
+curl "http://localhost:8080/api/v1/vendor-contract/utxos?limit=10"
+```
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "tx_hash": "cb923b75...",
+      "output_index": 0,
+      "address": "addr1x...",
+      "lovelace_amount": 79500000000,
+      "slot": 186056809,
+      "block_number": 13361422,
+      "project_db_id": 8,
+      "project_id": "EG-0001-25",
+      "project_name": "AdaStat.net Cardano blockchain explorer",
+      "project_status": "active"
+    }
+  ],
+  "pagination": { "page": 1, "limit": 10, "total_count": 33, "has_next": true },
+  "meta": { ... }
+}
+```
+
+**Errors:**
+- `404 Not Found` - Vendor contract not yet known (first fund event has not been processed)
+
+---
+
 ### Projects
 
 #### `GET /api/v1/projects`
@@ -298,6 +343,7 @@ Get detailed information about a specific project.
 **Response:** Same as list item but with additional fields:
 - `other_identifiers`: Related project IDs
 - `vendor_payment_key_hash`: Vendor payment key hash from inline datum
+- `current_utxos`: Array of `{ tx_hash, output_index, lovelace_amount, slot }` for the project's currently-unspent outputs at the vendor contract. Empty when fully withdrawn. Sum equals `financials.current_balance_lovelace`.
 - `created_at`, `updated_at`: Timestamps
 
 **Errors:**
