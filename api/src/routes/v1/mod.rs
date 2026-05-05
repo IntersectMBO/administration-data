@@ -28,6 +28,7 @@ pub fn router() -> Router {
         .route("/treasury/events", get(treasury::get_treasury_events))
         // Vendor contract endpoint (the singleton shared PSSC)
         .route("/vendor-contract", get(vendor_contract::get_vendor_contract))
+        .route("/vendor-contract/utxos", get(vendor_contract::get_vendor_contract_utxos))
         // Project endpoints (one per fund event; 42 of these for our deployment)
         .route("/projects", get(projects::list_projects))
         .route("/projects/:project_id", get(projects::get_project))

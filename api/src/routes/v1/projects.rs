@@ -9,8 +9,8 @@ use sqlx::PgPool;
 use crate::errors::ApiError;
 use crate::models::v1::{
     ApiResponse, EventResponse, EventWithContextRow, MilestoneResponse, MilestoneRow,
-    PaginatedResponse, PaginationQuery, ProjectEventsQuery, UtxoResponse, UtxoRow,
-    ProjectDetail, ProjectSummary, ProjectSummaryRow, ProjectsQuery,
+    PaginatedResponse, PaginationQuery, ProjectCurrentUtxo, ProjectDetail, ProjectEventsQuery,
+    ProjectSummary, ProjectSummaryRow, ProjectsQuery, UtxoResponse, UtxoRow,
 };
 
 /// List all vendor contracts
@@ -164,7 +164,35 @@ pub async fn get_project(
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("vendor contract `{}` not found", project_id)))?;
 
-    Ok(Json(ApiResponse::new(ProjectDetail::from(row))))
+    let project_db_id = row.id;
+    let mut detail = ProjectDetail::from(row);
+
+    // Inline the project's currently-unspent UTxOs so callers don't need a
+    // second round trip to /projects/:id/utxos for the live state. Same
+    // unspent-source-of-truth pattern as that endpoint.
+    detail.current_utxos = sqlx::query_as::<_, ProjectCurrentUtxo>(
+        r#"
+        SELECT
+            au.tx_hash,
+            au.output_index,
+            au.lovelace_amount,
+            au.slot
+        FROM yaci_store.address_utxo au
+        JOIN treasury.utxo_history uh
+            ON uh.tx_hash = au.tx_hash AND uh.output_index = au.output_index
+        WHERE uh.project_db_id = $1
+          AND NOT EXISTS (
+              SELECT 1 FROM yaci_store.tx_input ti
+              WHERE ti.tx_hash = au.tx_hash AND ti.output_index = au.output_index
+          )
+        ORDER BY au.slot DESC, au.tx_hash ASC, au.output_index ASC
+        "#,
+    )
+    .bind(project_db_id)
+    .fetch_all(&pool)
+    .await?;
+
+    Ok(Json(ApiResponse::new(detail)))
 }
 
 /// Get milestones for a vendor contract (paginated)

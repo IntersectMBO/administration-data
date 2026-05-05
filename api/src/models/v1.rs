@@ -388,6 +388,9 @@ pub struct ProjectDetail {
     pub last_event_time: Option<ChainTime>,
     /// Total event count
     pub event_count: Option<i64>,
+    /// Currently-unspent UTxOs belonging to this project at the vendor contract.
+    /// Empty when the project has no live outputs (fully withdrawn or pre-fund).
+    pub current_utxos: Vec<ProjectCurrentUtxo>,
     /// Record created at
     pub created_at: Option<DateTime<Utc>>,
     /// Record updated at
@@ -429,6 +432,20 @@ pub struct VendorFinancials {
 pub struct TreasuryReference {
     /// Contract instance identifier
     pub contract_instance: Option<String>,
+}
+
+/// Compact UTxO reference embedded on `ProjectDetail` to give clients the
+/// project's currently-unspent outputs without a second round trip.
+#[derive(Debug, Serialize, Deserialize, ToSchema, FromRow)]
+pub struct ProjectCurrentUtxo {
+    /// Transaction hash
+    pub tx_hash: String,
+    /// Output index
+    pub output_index: i16,
+    /// Amount in lovelace
+    pub lovelace_amount: Option<i64>,
+    /// Creation slot
+    pub slot: Option<i64>,
 }
 
 /// Database row for vendor contract summary
@@ -551,6 +568,7 @@ impl From<ProjectSummaryRow> for ProjectDetail {
             },
             last_event_time: ChainTime::maybe_from_secs(row.last_event_time),
             event_count: row.event_count,
+            current_utxos: Vec::new(), // populated by handler after this conversion
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
@@ -935,6 +953,63 @@ impl From<UtxoRow> for UtxoResponse {
             lovelace_amount: row.lovelace_amount,
             slot: row.slot,
             block_number: row.block_number,
+        }
+    }
+}
+
+/// UTXO at the shared vendor contract, labeled with the owning project.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct ProjectUtxoResponse {
+    /// Transaction hash
+    pub tx_hash: String,
+    /// Output index
+    pub output_index: i16,
+    /// Address (always the singleton PSSC for this endpoint)
+    pub address: Option<String>,
+    /// Amount in lovelace
+    pub lovelace_amount: Option<i64>,
+    /// Creation slot
+    pub slot: Option<i64>,
+    /// Block number
+    pub block_number: Option<i64>,
+    /// Internal project DB id
+    pub project_db_id: i32,
+    /// Logical project identifier (e.g., "EC-0008-25")
+    pub project_id: String,
+    /// Project display name
+    pub project_name: Option<String>,
+    /// Project status (active/paused/completed/cancelled)
+    pub project_status: Option<String>,
+}
+
+/// Database row for a project-labeled vendor-contract UTXO.
+#[derive(Debug, FromRow)]
+pub struct ProjectUtxoRow {
+    pub tx_hash: String,
+    pub output_index: i16,
+    pub address: Option<String>,
+    pub lovelace_amount: Option<i64>,
+    pub slot: Option<i64>,
+    pub block_number: Option<i64>,
+    pub project_db_id: i32,
+    pub project_id: String,
+    pub project_name: Option<String>,
+    pub project_status: Option<String>,
+}
+
+impl From<ProjectUtxoRow> for ProjectUtxoResponse {
+    fn from(row: ProjectUtxoRow) -> Self {
+        Self {
+            tx_hash: row.tx_hash,
+            output_index: row.output_index,
+            address: row.address,
+            lovelace_amount: row.lovelace_amount,
+            slot: row.slot,
+            block_number: row.block_number,
+            project_db_id: row.project_db_id,
+            project_id: row.project_id,
+            project_name: row.project_name,
+            project_status: row.project_status,
         }
     }
 }

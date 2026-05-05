@@ -7,11 +7,12 @@ use crate::models::v1::{
     EventResponse, EventStats, EventTreasuryContext, EventsQuery, FinancialStats,
     MilestoneArchiveInfo, MilestoneCompletion, MilestoneWithdrawal, MilestoneResponse,
     MilestoneStats, MilestonesSummary, MilestonesQuery, PaginatedResponse, Pagination,
-    PaginationQuery, ProjectDetail, ProjectEventsQuery, ProjectReference, ProjectStats,
-    ProjectSummary, ProjectsQuery, RecentEventsQuery, ResponseMeta, StatisticsResponse,
-    StatusResponse, SyncStats, SyncStatusBlock, TotalsBlock, TreasuryFinancials,
-    TreasuryReference, TreasuryResponse, TreasuryStatistics, TreasuryStats, UtxoResponse,
-    VendorContractProjectsBlock, VendorContractResponse, VendorContractStats, VendorFinancials,
+    PaginationQuery, ProjectCurrentUtxo, ProjectDetail, ProjectEventsQuery, ProjectReference,
+    ProjectStats, ProjectSummary, ProjectUtxoResponse, ProjectsQuery, RecentEventsQuery,
+    ResponseMeta, StatisticsResponse, StatusResponse, SyncStats, SyncStatusBlock, TotalsBlock,
+    TreasuryFinancials, TreasuryReference, TreasuryResponse, TreasuryStatistics, TreasuryStats,
+    UtxoResponse, VendorContractProjectsBlock, VendorContractResponse, VendorContractStats,
+    VendorFinancials,
 };
 
 use crate::routes::v1::{
@@ -50,6 +51,7 @@ use crate::routes::v1::{
         treasury::get_treasury_utxos,
         treasury::get_treasury_events,
         vendor_contract::get_vendor_contract,
+        vendor_contract::get_vendor_contract_utxos,
         projects::list_projects,
         projects::get_project,
         projects::get_project_milestones,
@@ -80,6 +82,7 @@ use crate::routes::v1::{
             PaginatedResponse<Vec<MilestoneResponse>>,
             PaginatedResponse<Vec<EventResponse>>,
             PaginatedResponse<Vec<UtxoResponse>>,
+            PaginatedResponse<Vec<ProjectUtxoResponse>>,
             Pagination,
             ResponseMeta,
             // Treasury
@@ -108,6 +111,8 @@ use crate::routes::v1::{
             EventMilestoneContext,
             // UTXOs
             UtxoResponse,
+            ProjectUtxoResponse,
+            ProjectCurrentUtxo,
             // Statistics
             StatisticsResponse,
             TreasuryStats,
