@@ -1,1 +1,5 @@
 .env
+.DS_Store
+api/logs/
+indexer/logs/
+scripts/diverging_events.csv

@@ -1,13 +1,16 @@
 //! V1 API Routes
 //!
-//! New API design with:
-//! - Consistent response envelopes
-//! - Pagination support
-//! - Both lovelace and ADA amounts
-//! - Raw and parsed metadata
+//! Conventions:
+//! - Consistent response envelopes (`ApiResponse` / `PaginatedResponse`).
+//! - Errors return a parallel `ApiErrorBody` envelope.
+//! - Pagination on every list endpoint.
+//! - Amounts in lovelace only (1 ADA = 1,000,000 lovelace).
+//! - On-chain block times are paired `{unix, iso}`; server-side timestamps stay ISO.
+//! - Raw and parsed metadata.
 
 pub mod treasury;
-pub mod vendor_contracts;
+pub mod vendor_contract;
+pub mod projects;
 pub mod milestones;
 pub mod events;
 pub mod statistics;
@@ -19,19 +22,23 @@ pub fn router() -> Router {
     Router::new()
         // Status endpoint
         .route("/status", get(status::get_status))
-        // Treasury endpoints
+        // Treasury endpoint (the singleton TRSC)
         .route("/treasury", get(treasury::get_treasury))
         .route("/treasury/utxos", get(treasury::get_treasury_utxos))
         .route("/treasury/events", get(treasury::get_treasury_events))
-        // Vendor contracts endpoints
-        .route("/vendor-contracts", get(vendor_contracts::list_vendor_contracts))
-        .route("/vendor-contracts/:project_id", get(vendor_contracts::get_vendor_contract))
-        .route("/vendor-contracts/:project_id/milestones", get(vendor_contracts::get_vendor_contract_milestones))
-        .route("/vendor-contracts/:project_id/events", get(vendor_contracts::get_vendor_contract_events))
-        .route("/vendor-contracts/:project_id/utxos", get(vendor_contracts::get_vendor_contract_utxos))
+        // Vendor contract endpoint (the singleton shared PSSC)
+        .route("/vendor-contract", get(vendor_contract::get_vendor_contract))
+        .route("/vendor-contract/utxos", get(vendor_contract::get_vendor_contract_utxos))
+        // Project endpoints (one per fund event; 42 of these for our deployment)
+        .route("/projects", get(projects::list_projects))
+        .route("/projects/:project_id", get(projects::get_project))
+        .route("/projects/:project_id/milestones", get(projects::get_project_milestones))
+        .route("/projects/:project_id/events", get(projects::get_project_events))
+        .route("/projects/:project_id/utxos", get(projects::get_project_utxos))
         // Milestones endpoints
         .route("/milestones", get(milestones::list_milestones))
-        .route("/milestones/:id", get(milestones::get_milestone))
+        .route("/milestones/by-id/:id", get(milestones::get_milestone))
+        .route("/milestones/:project_id", get(milestones::list_milestones_by_project))
         // Events endpoints
         .route("/events", get(events::list_events))
         .route("/events/recent", get(events::get_recent_events))
@@ -41,10 +48,15 @@ pub fn router() -> Router {
 }
 
 pub mod status {
-    use axum::{extract::Extension, http::StatusCode, response::Json};
+    use axum::{extract::Extension, response::Json};
     use sqlx::PgPool;
+    use std::collections::HashMap;
 
-    use crate::models::v1::{ApiResponse, StatusResponse};
+    use crate::errors::ApiError;
+    use crate::models::time::ChainTime;
+    use crate::models::v1::{
+        ApiResponse, ChainStatus, DatabaseStatus, StatusResponse, SyncStatusBlock, TotalsBlock,
+    };
 
     /// Get API status and sync information
     #[utoipa::path(
@@ -57,46 +69,75 @@ pub mod status {
     )]
     pub async fn get_status(
         Extension(pool): Extension<PgPool>,
-    ) -> Result<Json<ApiResponse<StatusResponse>>, StatusCode> {
-        // Get sync status
-        let sync_row = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<chrono::DateTime<chrono::Utc>>)>(
-            "SELECT last_slot, last_block, updated_at FROM treasury.sync_status WHERE sync_type = 'events'"
+    ) -> Result<Json<ApiResponse<StatusResponse>>, ApiError> {
+        // Sync heartbeat (server-side ISO)
+        let heartbeat: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+            "SELECT updated_at FROM treasury.sync_status WHERE sync_type = 'events'",
+        )
+        .fetch_optional(&pool)
+        .await?
+        .flatten();
+
+        // Most recent TOM event processed (on-chain ChainTime)
+        let last_event_block_time: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(block_time) FROM treasury.events",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(None);
+
+        // Indexer cursor + block time of that block
+        let cursor: Option<(Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
+            r#"
+            SELECT c.block_number, c.slot, b.block_time
+            FROM yaci_store.cursor_ c
+            LEFT JOIN yaci_store.block b ON b.number = c.block_number
+            ORDER BY c.slot DESC
+            LIMIT 1
+            "#,
         )
         .fetch_optional(&pool)
         .await
-        .map_err(|e| {
-            tracing::error!("Database query error: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        .unwrap_or(None);
+        let (indexer_block, indexer_slot, indexer_block_time) = cursor.unwrap_or((None, None, None));
 
-        let (last_slot, last_block, last_sync_time) = sync_row.unwrap_or((None, None, None));
-
-        // Get event count
+        // Totals
         let (total_events,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM treasury.events")
             .fetch_one(&pool)
-            .await
-            .map_err(|e| {
-                tracing::error!("Database query error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+            .await?;
 
-        // Get vendor contract count
-        let (total_vendor_contracts,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM treasury.vendor_contracts")
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| {
-                tracing::error!("Database query error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+        let (total_projects,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM treasury.projects")
+                .fetch_one(&pool)
+                .await?;
+
+        let by_type_rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT event_type, COUNT(*) FROM treasury.events GROUP BY event_type ORDER BY 1",
+        )
+        .fetch_all(&pool)
+        .await?;
+        let events_by_type: HashMap<String, i64> = by_type_rows.into_iter().collect();
 
         Ok(Json(ApiResponse::new(StatusResponse {
-            api_version: "1.0.0".to_string(),
-            database_connected: true,
-            last_sync_slot: last_slot,
-            last_sync_block: last_block,
-            last_sync_time: last_sync_time.map(|t| t.timestamp()),
-            total_events,
-            total_vendor_contracts,
+            api_version: "2.0.0".to_string(),
+            database: DatabaseStatus {
+                connected: true,
+                checked_at: chrono::Utc::now(),
+            },
+            sync: SyncStatusBlock {
+                heartbeat,
+                last_event_processed: ChainTime::maybe_from_secs(last_event_block_time),
+            },
+            chain: ChainStatus {
+                indexer_block,
+                indexer_slot,
+                indexer_time: ChainTime::maybe_from_secs(indexer_block_time),
+            },
+            totals: TotalsBlock {
+                events: total_events,
+                projects: total_projects,
+                events_by_type,
+            },
         })))
     }
 }

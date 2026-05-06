@@ -54,8 +54,8 @@ store.cardano.protocol-magic=764824073
 The sync start point is configured via environment variables in `.env`:
 
 ```bash
-STORE_CARDANO_SYNC_START_SLOT=160964954
-STORE_CARDANO_SYNC_START_BLOCKHASH=560c7537831007f9670d287b15a69ba18a322b1edc39c0c23ccab3c12ad77b9f
+STORE_CARDANO_SYNC_START_SLOT=160963800
+STORE_CARDANO_SYNC_START_BLOCKHASH=65233bb713c15c4bb427ccbf0e7e5c1c6a6a9c5c04b5edfa1e0e8e72f1285c9c
 ```
 
 Remove these from `.env` to sync from genesis.
