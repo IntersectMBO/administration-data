@@ -59,10 +59,18 @@ jobs:
             api
           docker push "$IMAGE_URI"
       
+      - name: Fetch secrets from Keeper
+        id: ksm
+        uses: Keeper-Security/ksm-action@master
+        with:
+          keeper-secret-config: ${{ secrets.KSM_CONFIG }}
+          secrets: |
+            ChhuZiRi19lHYf2qRHCI2A/custom_field/PAT > HELM_REPO_TOKEN
+
       - name: Trigger Helm bump workflow
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.HELM_REPO_TOKEN }}
+          GH_TOKEN: ${{ steps.ksm.outputs.HELM_REPO_TOKEN }}
           HELM_OWNER: IntersectMBO
           HELM_REPO: helm-charts
           IMAGE_REPO_URI: ${{ vars.ECR_REPO_URI }}
